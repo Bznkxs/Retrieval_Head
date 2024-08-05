@@ -1,0 +1,18 @@
+
+# python needle_in_haystack_with_mask.py --mask_top 0 --s 8000 --e 16000 --model_provider Mistral --model_path ../models/m_0.03_keep_120_rescale_True_substitute_io_False_substitute_linear_True_resized_False_lkr_0.125_linear_rescale_True_double_delta_linear_merging_method_double_delta
+#python needle_in_haystack_with_mask.py --mask_top 0 --s 8000 --e 16000 --model_provider Mistral --model_path ../models/m_0.03_keep_120_rescale_True_substitute_io_False_substitute_linear_True_resized_False_lkr_0.125_linear_rescale_True_double_delta_linear_merging_method_double_sample
+#python needle_in_haystack_with_mask.py --mask_top 0 --s 8000 --e 16000 --model_provider Mistral --model_path ../models/m_0.03_keep_120_rescale_True_substitute_io_False_substitute_linear_True_resized_False_lkr_0.125_linear_rescale_True_double_delta_linear_merging_method_simple_delta
+#
+#python needle_in_haystack_with_mask.py --mask_top 0 --s 8000 --e 16000 --model_provider Mistral --model_path ../models/m_0.03_keep_120_rescale_True_substitute_io_False_substitute_linear_True_resized_False_lkr_0.125_linear_rescale_True_simple_delta_linear_merging_method_double_delta
+#python needle_in_haystack_with_mask.py --mask_top 0 --s 8000 --e 16000 --model_provider Mistral --model_path ../models/m_0.03_keep_120_rescale_True_substitute_io_False_substitute_linear_True_resized_False_lkr_0.125_linear_rescale_True_simple_delta_linear_merging_method_double_sample
+#python needle_in_haystack_with_mask.py --mask_top 0 --s 8000 --e 16000 --model_provider Mistral --model_path ../models/m_0.03_keep_120_rescale_True_substitute_io_False_substitute_linear_True_resized_False_lkr_0.125_linear_rescale_True_simple_delta_linear_merging_method_simple_delta
+
+python needle_in_haystack_with_mask.py --mask_top 0 --s 1000 --e 16000 --model_provider Mistral --model_path ../models/alco_500lkr_1_linear_double_sample_1024_linear_merging_method_double_sample_mlpk_False_False_False_krdf_True
+python needle_in_haystack_with_mask.py --mask_top 0 --s 1000 --e 16000 --model_provider Mistral --model_path ../models/alco_1024lkr_1_linear_double_sample_1024_linear_merging_method_double_sample_mlpk_False_False_False_krdf_True
+python needle_in_haystack_with_mask.py --mask_top 0 --s 1000 --e 16000 --model_provider Mistral --model_path ../models/alco_750lkr_1_linear_double_sample_1024_linear_merging_method_double_sample_mlpk_False_False_False_krdf_True
+python needle_in_haystack_with_mask.py --mask_top 0 --s 1000 --e 16000 --model_provider Mistral --model_path ../models/alco_120lkr_1_linear_double_sample_1024_linear_merging_method_double_sample_mlpk_False_False_False_krdf_True
+
+python needle_in_haystack_with_mask.py --mask_top 0 --s 1000 --e 16000 --model_provider Mistral --model_path ../models/lco_500lkr_1_linear_double_sample_1024_linear_merging_method_double_sample_mlpk_False_False_False_krdf_True
+python needle_in_haystack_with_mask.py --mask_top 0 --s 1000 --e 16000 --model_provider Mistral --model_path ../models/lco_1024lkr_1_linear_double_sample_1024_linear_merging_method_double_sample_mlpk_False_False_False_krdf_True
+python needle_in_haystack_with_mask.py --mask_top 0 --s 1000 --e 16000 --model_provider Mistral --model_path ../models/lco_750lkr_1_linear_double_sample_1024_linear_merging_method_double_sample_mlpk_False_False_False_krdf_True
+python needle_in_haystack_with_mask.py --mask_top 0 --s 1000 --e 16000 --model_provider Mistral --model_path ../models/lco_120lkr_1_linear_double_sample_1024_linear_merging_method_double_sample_mlpk_False_False_False_krdf_True
