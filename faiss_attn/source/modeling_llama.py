@@ -399,9 +399,11 @@ class LlamaAttention(nn.Module):
                     base=self.rope_theta,
                 )
             elif scaling_type == "llama3":
-                self.rotary_emb = ExtendedRotaryEmbedding(head_size, rotary_dim,
-                                                         max_position, base,
-                                                         is_neox_style, dtype)
+                self.rotary_emb = ExtendedRotaryEmbedding(
+                    self.head_dim,
+                    max_position_embeddings=self.max_position_embeddings,
+                    base=self.rope_theta,
+                )
             else:
                 raise ValueError(f"Unknown RoPE scaling type {scaling_type}")
 
