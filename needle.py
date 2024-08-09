@@ -1,5 +1,5 @@
 """
-This script is adapted from 
+This script is adapted from
 https://github.com/gkamradt/LLMTest_NeedleInAHaystack
 
 # GPT-4
@@ -33,13 +33,14 @@ python -u needle_in_haystack.py --s_len 0 --e_len 128000\
 ) 2>&1  | tee logs/eval_llama-2-7b-80k.log
 """
 
-#import tiktoken
-import os 
+# import tiktoken
+import os
 import glob
 import json
 from transformers import AutoTokenizer, AutoConfig, AutoModelForCausalLM
 import sys
 import random
+
 sys.path.append("./faiss_attn/")
 from source.modeling_llama import LlamaForCausalLM, LlamaConfig
 from source.modeling_qwen2 import Qwen2ForCausalLM
@@ -53,48 +54,52 @@ from rouge_score import rouge_scorer
 
 scorer = rouge_scorer.RougeScorer(['rouge1', 'rougeL'], use_stemmer=True)
 
-#from openai import OpenAI
+# from openai import OpenAI
 from datetime import datetime, timezone
 from collections import defaultdict
 import time
 import torch
 
+
 def reset_rope(model, model_max_train_len, scaling_factor):
     for l in model.model.layers:
         l.self_attn.rotary_emb.scaling_factor = scaling_factor
-        l.self_attn.rotary_emb._set_cos_sin_cache(seq_len=model_max_train_len, device=l.self_attn.rotary_emb.inv_freq.device, dtype=torch.float32)
+        l.self_attn.rotary_emb._set_cos_sin_cache(seq_len=model_max_train_len,
+                                                  device=l.self_attn.rotary_emb.inv_freq.device, dtype=torch.float32)
     return
+
 
 class LLMNeedleHaystackTester:
     """
     This class is used to test the LLM Needle Haystack.
     """
+
     def __init__(self,
                  needle="\nThe best thing to do in San Francisco is eat a sandwich and sit in Dolores Park on a sunny day.\n",
                  haystack_dir="PaulGrahamEssays",
                  retrieval_question="What is the best thing to do in San Francisco?",
-                 results_version = 1,
-                 context_lengths_min = 1000,
-                 context_lengths_max = 128000,
-                 context_lengths_num_intervals = 40,
-                 context_lengths = None,
-                 document_depth_percent_min = 0,
-                 document_depth_percent_max = 100,
-                 document_depth_percent_intervals = 10,
-                 document_depth_percents = None,
-                 document_depth_percent_interval_type = "linear",
-                 model_provider = "OpenAI",
+                 results_version=1,
+                 context_lengths_min=1000,
+                 context_lengths_max=128000,
+                 context_lengths_num_intervals=40,
+                 context_lengths=None,
+                 document_depth_percent_min=0,
+                 document_depth_percent_max=100,
+                 document_depth_percent_intervals=10,
+                 document_depth_percents=None,
+                 document_depth_percent_interval_type="linear",
+                 model_provider="OpenAI",
                  mask_topk=0,
-                 anthropic_api_key = None,
+                 anthropic_api_key=None,
                  model_name='',
                  model_name_suffix=None,
-                 num_concurrent_requests = 1,
-                 save_results = True,
-                 save_contexts = True,
-                 final_context_length_buffer = 200,
-                 seconds_to_sleep_between_completions = None,
-                 print_ongoing_status = True):
-        """        
+                 num_concurrent_requests=1,
+                 save_results=True,
+                 save_contexts=True,
+                 final_context_length_buffer=200,
+                 seconds_to_sleep_between_completions=None,
+                 print_ongoing_status=True):
+        """
         :param needle: The needle to be found in the haystack. Default is None.
         :param haystack_dir: The directory of text files to use as background context (or a haystack) in which the needle is to be found. Default is Paul Graham Essays.
         :param retrieval_question: The question which with to prompt the model to do the retrieval.
@@ -121,7 +126,7 @@ class LLMNeedleHaystackTester:
         """
         if not needle or not haystack_dir or not retrieval_question:
             raise ValueError("Needle, haystack, and retrieval_question must be provided.")
-        
+
         self.needle = needle
         self.haystack_dir = haystack_dir
         self.retrieval_question = retrieval_question
@@ -137,39 +142,49 @@ class LLMNeedleHaystackTester:
         self.head_counter = defaultdict(list)
         self.mask_topk = mask_topk
         if "CUDA_VISIBLE_DEVICES" in os.environ:
-            self.multi_gpus = len(os.environ["CUDA_VISIBLE_DEVICES"])>1
+            self.multi_gpus = len(os.environ["CUDA_VISIBLE_DEVICES"]) > 1
         else:
             self.multi_gpus = True
-        if("/" in model_name):
+        if ("/" in model_name):
             self.model_version = model_name.split("/")[-1]
-        else: self.model_version = model_name
-        if(model_name_suffix is not None): self.model_version += "_" + model_name_suffix
+        else:
+            self.model_version = model_name
+        if (model_name_suffix is not None): self.model_version += "_" + model_name_suffix
 
         if context_lengths is None:
             if context_lengths_min is None or context_lengths_max is None or context_lengths_num_intervals is None:
-                raise ValueError("Either context_lengths_min, context_lengths_max, context_lengths_intervals need to be filled out OR the context_lengths_list needs to be supplied.")
+                raise ValueError(
+                    "Either context_lengths_min, context_lengths_max, context_lengths_intervals need to be filled out OR the context_lengths_list needs to be supplied.")
             else:
-                self.context_lengths = np.round(np.linspace(context_lengths_min, context_lengths_max, num=context_lengths_num_intervals, endpoint=True)).astype(int)
+                self.context_lengths = np.round(
+                    np.linspace(context_lengths_min, context_lengths_max, num=context_lengths_num_intervals,
+                                endpoint=True)).astype(int)
         else:
             self.context_lengths = context_lengths
 
         if document_depth_percents is None:
             if document_depth_percent_min is None or document_depth_percent_max is None or document_depth_percent_intervals is None:
-                raise ValueError("Either document_depth_percent_min, document_depth_percent_max, document_depth_percent_intervals need to be filled out OR the document_depth_percents needs to be supplied.")
+                raise ValueError(
+                    "Either document_depth_percent_min, document_depth_percent_max, document_depth_percent_intervals need to be filled out OR the document_depth_percents needs to be supplied.")
             else:
                 if document_depth_percent_interval_type == 'linear':
-                    self.document_depth_percents = np.round(np.linspace(document_depth_percent_min, document_depth_percent_max, num=document_depth_percent_intervals, endpoint=True)).astype(int)
+                    self.document_depth_percents = np.round(
+                        np.linspace(document_depth_percent_min, document_depth_percent_max,
+                                    num=document_depth_percent_intervals, endpoint=True)).astype(int)
                 elif document_depth_percent_interval_type == 'sigmoid':
-                    self.document_depth_percents = [self.logistic(x) for x in np.linspace(document_depth_percent_min, document_depth_percent_max, document_depth_percent_intervals)]
+                    self.document_depth_percents = [self.logistic(x) for x in
+                                                    np.linspace(document_depth_percent_min, document_depth_percent_max,
+                                                                document_depth_percent_intervals)]
         else:
             self.document_depth_percents = document_depth_percents
 
         if document_depth_percent_interval_type not in [None, "linear", "sigmoid"]:
-            raise ValueError("document_depth_percent_interval_type must be either None, 'linear' or 'sigmoid'. If you'd like your own distribution give a list of ints in via document_depth_percent_intervals")
-        
+            raise ValueError(
+                "document_depth_percent_interval_type must be either None, 'linear' or 'sigmoid'. If you'd like your own distribution give a list of ints in via document_depth_percent_intervals")
+
         self.model_name = model_name
 
-        if(self.model_provider not in ["OpenAI", "Anthropic"]):
+        if (self.model_provider not in ["OpenAI", "Anthropic"]):
             self.enc = AutoTokenizer.from_pretrained(model_name)
             print("loading from %s" % model_name)
             config = AutoConfig.from_pretrained(model_name)
@@ -177,21 +192,24 @@ class LLMNeedleHaystackTester:
             print(f"layer number: {self.layer_num}, head number {self.head_num}")
             self.model_version += "_" + self.model_provider
             if "Qwen" in self.model_version:
-                self.model_to_test = Qwen2ForCausalLM.from_pretrained(
-                       model_name,torch_dtype="auto",device_map='auto',use_flash_attention_2="flash_attention_2"
-                    )
+                self.model_to_test = AutoModelForCausalLM.from_pretrained(
+                    model_name, torch_dtype="auto", device_map='auto', use_flash_attention_2="flash_attention_2"
+                )
             elif "Mixtral" in self.model_version:
-                self.model_to_test = MixtralForCausalLM.from_pretrained(
-                       model_name,torch_dtype="auto",device_map='auto',use_flash_attention_2="flash_attention_2",trust_remote_code=True,
-                    )
+                self.model_to_test = AutoModelForCausalLM.from_pretrained(
+                    model_name, torch_dtype="auto", device_map='auto', use_flash_attention_2="flash_attention_2",
+                    trust_remote_code=True,
+                )
             elif "Mistral" in self.model_version:
-                self.model_to_test = MistralForCausalLM.from_pretrained(
-                       model_name,torch_dtype=torch.bfloat16,device_map='auto',use_flash_attention_2="flash_attention_2",trust_remote_code=True,
-                    )
+                self.model_to_test = AutoModelForCausalLM.from_pretrained(
+                    model_name, torch_dtype=torch.bfloat16, device_map='auto',
+                    use_flash_attention_2="flash_attention_2", trust_remote_code=True,
+                )
             elif "Phi3" in self.model_version:
-                self.model_to_test = Phi3ForCausalLM.from_pretrained(
-                       model_name,torch_dtype="auto",device_map='auto',use_flash_attention_2="flash_attention_2",trust_remote_code=True,
-                    )
+                self.model_to_test = AutoModelForCausalLM.from_pretrained(
+                    model_name, torch_dtype=torch.bfloat16, device_map='auto', use_flash_attention_2="flash_attention_2",
+                    trust_remote_code=True,
+                )
             else:
                 # self.model_to_test = LlamaForCausalLM.from_pretrained(model_name,
                 #     use_flash_attention_2="flash_attention_2", torch_dtype=torch.bfloat16,device_map='auto').eval()
@@ -202,28 +220,28 @@ class LLMNeedleHaystackTester:
             if 'llama-2-7b-80k' in self.model_version:
                 scaling_factor = 10
                 reset_rope(self.model_to_test, model_max_train_len=81920, scaling_factor=scaling_factor)
-        else: 
+        else:
             self.model_to_test = OpenAI(api_key=openai_api_key)
-            if(self.model_provider == "OpenAI"):
+            if (self.model_provider == "OpenAI"):
                 self.enc = tiktoken.encoding_for_model(self.model_name)
-            elif(self.model_provider == "Anthropic"):
+            elif (self.model_provider == "Anthropic"):
                 self.enc = Anthropic().get_tokenizer()
 
         self.model_to_test_description = model_name
-        
+
         self.evaluation_model = None
         if "CUDA_VISIBLE_DEVICES" in os.environ:
-            self.multi_gpus = len(os.environ["CUDA_VISIBLE_DEVICES"])>1
+            self.multi_gpus = len(os.environ["CUDA_VISIBLE_DEVICES"]) > 1
         else:
             self.multi_gpus = True
         model_name = model_name.split('/')[-1]
-        if self.mask_topk!=0:
-            if model_name=='Mistral-7B-Instruct-v0.2':
+        if self.mask_topk != 0:
+            if model_name == 'Mistral-7B-Instruct-v0.2':
                 model_name = "Mistral-7B-v0.2-hf"
             with open(f"head_score/{model_name}.json", "r") as file:
-                stable_block_list =  json.loads(file.readline())
+                stable_block_list = json.loads(file.readline())
             stable_block_list = [(l[0], np.mean(l[1])) for l in stable_block_list.items()]
-            stable_block_list = sorted(stable_block_list, key=lambda x: x[1], reverse=True) 
+            stable_block_list = sorted(stable_block_list, key=lambda x: x[1], reverse=True)
             self.block_list = [[int(ll) for ll in l[0].split("-")] for l in stable_block_list][:100]
             if self.mask_topk > 0:
                 print(f"masking out top {self.mask_topk} retrieval heads")
@@ -238,7 +256,7 @@ class LLMNeedleHaystackTester:
         if x == 100:
             return 100
         return np.round(L / (1 + np.exp(-k * (x - x0))), 3)
-    
+
     def bound_evaluate_and_log(self, *args):
         self.evaluate_and_log(*args)
 
@@ -254,21 +272,23 @@ class LLMNeedleHaystackTester:
     def generate_prompt(self, context):
         # Generate the prompt for the Anthropic model
         # Replace the following line with the appropriate prompt structure
-        test_format=f"This is a very long story book: <book> {context} </book>.\n"
+        test_format = f"This is a very long story book: <book> {context} </book>.\n"
         if self.model_version in ["Mistral-7B-Instruct-v0.2"]:
             prompt = [
-            {"role": "user", "content": f"<book>{context}</book>\nBased on the content of the book, Question: {self.retrieval_question}\nAnswer:"},]
+                {"role": "user",
+                 "content": f"<book>{context}</book>\nBased on the content of the book, Question: {self.retrieval_question}\nAnswer:"}, ]
         return prompt
-    
-    def retrieval_calculate(self, attention_maxtrix,retrieval_score, inp, step_token,topk=1):
+
+    def retrieval_calculate(self, attention_maxtrix, retrieval_score, inp, step_token, topk=1):
         for layer_idx in range(32):
             for head_idx in range(32):
                 values, idx = attention_maxtrix[layer_idx][0][head_idx][-1].topk(topk)
                 for v, i in zip(values, idx):
-                    if  self.needle_start <= i < self.needle_end and inp.item()==self.prompt_ids[i].item():
-                        retrieval_score[layer_idx][head_idx][0] += 1/(self.needle_end - self.needle_start)
+                    if self.needle_start <= i < self.needle_end and inp.item() == self.prompt_ids[i].item():
+                        retrieval_score[layer_idx][head_idx][0] += 1 / (self.needle_end - self.needle_start)
                         retrieval_score[layer_idx][head_idx][1] += step_token
                         break
+
     def retrieval_head_accumulate(self, retrieval_score):
         for layer_idx in range(32):
             for head_idx in range(32):
@@ -280,31 +300,32 @@ class LLMNeedleHaystackTester:
         for step_i in range(decode_len):
             inp = inp.view(1, 1)
             outputs = self.model_to_test(input_ids=inp, past_key_values=past_kv, use_cache=True, \
-                 output_attentions=False)
+                                         output_attentions=False)
             past_kv = outputs.past_key_values
             inp = outputs.logits[0, -1].argmax()
             step_token = self.enc.convert_ids_to_tokens(inp.item())
             output.append(inp.item())
-            #self.retrieval_calculate(outputs.attentions, retrieval_score, inp, step_token)
-            if step_token=='<0x0A>' or inp.item()==144: break
-            
-        return output, retrieval_score 
+            # self.retrieval_calculate(outputs.attentions, retrieval_score, inp, step_token)
+            if step_token == '<0x0A>' or inp.item() == 144: break
+
+        return output, retrieval_score
 
     def find_needle_idx(self, needle):
         needle_ids = self.enc(needle, add_special_tokens=False)["input_ids"]
-        #print( self.enc.decode(needle_ids, skip_special_tokens=False))
+        # print( self.enc.decode(needle_ids, skip_special_tokens=False))
         span_len = len(needle_ids)
         for i in range(len(self.prompt_ids)):
-            
-            token_span = self.prompt_ids[i : i + span_len]
+
+            token_span = self.prompt_ids[i: i + span_len]
             span_ids = set(token_span.tolist())
             overlap = float(len(span_ids.intersection(set(needle_ids)))) / len(set(needle_ids))
-            if(overlap > 0.9):
+            if (overlap > 0.9):
                 return i, i + span_len
         return -1, -1
+
     def construct_random_head(self, n):
         results = []
-        seed_list = [i  for i in range(32)]
+        seed_list = [i for i in range(32)]
         random.shuffle(seed_list)
         while len(results) < n:
             l, h = random.choices(seed_list, k=2)
@@ -313,6 +334,7 @@ class LLMNeedleHaystackTester:
             else:
                 results.append((l, h))
         return results
+
     def evaluate_and_log(self, context_length, depth_percent):
         # Checks to see if you've already checked a length/percent/version.
         # This helps if the program stop running and you want to restart later
@@ -330,63 +352,62 @@ class LLMNeedleHaystackTester:
         question = f"Based on the content of the book, Question: {self.retrieval_question}\nAnswer:"
         if self.model_version in ["Mistral-7B-Instruct-v0.2", "Qwen1.5-14B-Chat"]:
             prompt = [
-            {"role": "user", "content": f"<book>{context}</book>\nBased on the content of the book, Question: {self.retrieval_question}\nAnswer:"},
+                {"role": "user",
+                 "content": f"<book>{context}</book>\nBased on the content of the book, Question: {self.retrieval_question}\nAnswer:"},
             ]
-            input_ids = self.enc.apply_chat_template(conversation=prompt, tokenize=True,  add_generation_prompt=True, return_tensors='pt')
+            input_ids = self.enc.apply_chat_template(conversation=prompt, tokenize=True, add_generation_prompt=True,
+                                                     return_tensors='pt')
         else:
             input_context = context + question
-            input_ids = self.enc(input_context , return_tensors="pt")['input_ids']
-        
-            
+            input_ids = self.enc(input_context, return_tensors="pt")['input_ids']
+
         test_start_time = time.time()
-      
+
         self.real_needle = "eat a sandwich and sit in Dolores Park on a sunny day"
-        #self.prompt_ids = torch.concat([context_ids, question_ids], dim=1)[0, :]
+        # self.prompt_ids = torch.concat([context_ids, question_ids], dim=1)[0, :]
         self.prompt_ids = input_ids[0, :]
         if not self.multi_gpus:
             input_ids = input_ids.to(self.model_to_test.device)
 
         self.needle_start, self.needle_end = self.find_needle_idx(self.real_needle)
         with torch.no_grad():
-            q_outputs = self.model_to_test(input_ids=input_ids[:,:-1], use_cache=True, return_dict=True)
-            output, retrieval_score  = self.decode(q_outputs, input_ids[:,-1], 50)
-            response = self.enc.decode(output,skip_special_tokens=True).strip()
+            q_outputs = self.model_to_test(input_ids=input_ids[:, :-1], use_cache=True, return_dict=True)
+            output, retrieval_score = self.decode(q_outputs, input_ids[:, -1], 50)
+            response = self.enc.decode(output, skip_special_tokens=True).strip()
 
         test_end_time = time.time()
         test_elapsed_time = test_end_time - test_start_time
-        
-        score = scorer.score(self.real_needle, response)['rouge1'].recall*100
+
+        score = scorer.score(self.real_needle, response)['rouge1'].recall * 100
         results = {
-            'model' : self.model_to_test_description,
-            'context_length' : int(context_length),
-            'depth_percent' : float(depth_percent),
-            'version' : self.results_version,
-            'needle' : self.needle,
-            'model_response' : response,
-            'score' : score,
-            'test_duration_seconds' : test_elapsed_time,
-            'test_timestamp_utc' : datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S%z')
+            'model': self.model_to_test_description,
+            'context_length': int(context_length),
+            'depth_percent': float(depth_percent),
+            'version': self.results_version,
+            'needle': self.needle,
+            'model_response': response,
+            'score': score,
+            'test_duration_seconds': test_elapsed_time,
+            'test_timestamp_utc': datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S%z')
         }
 
         self.testing_results.append(results)
 
         if self.print_ongoing_status:
-            print (f"-- Test Summary -- ")
-            print (f"Duration: {test_elapsed_time:.1f} seconds")
-            print (f"Context: {context_length} tokens")
-            print (f"Depth: {depth_percent}%")
-            print (f"Score: {score}")
-            print (f"Response: {response}\n")
+            print(f"-- Test Summary -- ")
+            print(f"Duration: {test_elapsed_time:.1f} seconds")
+            print(f"Context: {context_length} tokens")
+            print(f"Depth: {depth_percent}%")
+            print(f"Score: {score}")
+            print(f"Response: {response}\n")
 
-        context_file_location = f'{self.model_version.replace(".", "_")}_len_{context_length}_depth_{int(depth_percent*100)}'
-        
-      
+        context_file_location = f'{self.model_version.replace(".", "_")}_len_{context_length}_depth_{int(depth_percent * 100)}'
+
         if self.save_results:
             # Save the context to file for retesting
             if not os.path.exists(f'results/graph/{save_name}'):
                 os.makedirs(f'results/graph/{save_name}')
-            
-    
+
             # Save the result to file for retesting
             p = f'results/graph/{save_name}/{context_file_location}_results.json'
             print("Writing at %s" % p)
@@ -428,7 +449,7 @@ class LLMNeedleHaystackTester:
         context = self.insert_needle(context, depth_percent, context_length)
 
         return context
-    
+
     def encode_text_to_tokens(self, text):
         if self.model_provider in ["OpenAI", "LLaMA", "Mistral", "GLM"]:
             return self.enc.encode(text)
@@ -437,7 +458,7 @@ class LLMNeedleHaystackTester:
             return self.enc.encode(text).ids
         else:
             raise ValueError("model_provider must be either 'OpenAI' or 'Anthropic'")
-    
+
     def insert_needle(self, context, depth_percent, context_length):
         tokens_needle = self.encode_text_to_tokens(self.needle)
         tokens_context = self.encode_text_to_tokens(context)
@@ -461,14 +482,18 @@ class LLMNeedleHaystackTester:
             tokens_new_context = tokens_context[:insertion_point]
 
             # We want to make sure that we place our needle at a sentence break so we first see what token a '.' is
-            if(self.model_provider in ["LLaMA", "LongLLaMA"]):
-                if self.encode_text_to_tokens('.')[0] in [29889, 869]: period_tokens = [29889, 869]
+            if (self.model_provider in ["LLaMA", "LongLLaMA"]):
+                if self.encode_text_to_tokens('.')[0] in [29889, 869]:
+                    period_tokens = [29889, 869]
                 else:
                     period_tokens = [88946, 13]
-            elif(self.model_provider == "Mistral"): period_tokens = [842, 28723]
-            elif(self.model_provider == "GLM"): period_tokens = [918, 30930]
-            else: period_tokens = self.encode_text_to_tokens('.')
-            
+            elif (self.model_provider == "Mistral"):
+                period_tokens = [842, 28723]
+            elif (self.model_provider == "GLM"):
+                period_tokens = [918, 30930]
+            else:
+                period_tokens = self.encode_text_to_tokens('.')
+
             # Then we iteration backwards until we find the first period
             while tokens_new_context and tokens_new_context[-1] not in period_tokens:
                 insertion_point -= 1
@@ -491,7 +516,7 @@ class LLMNeedleHaystackTester:
             encoded = self.enc.encode(context)
             return len(self.enc.encode(context).ids)
         else:
-            
+
             raise ValueError("model_provider must be either 'OpenAI' or 'Anthropic'")
 
     def read_context_files(self):
@@ -512,7 +537,7 @@ class LLMNeedleHaystackTester:
             return self.enc.encode(context).ids
         else:
             raise ValueError("model_provider must be either 'OpenAI' or 'Anthropic'")
-        
+
     def decode_tokens(self, tokens, context_length=None):
         if self.model_provider in ["OpenAI", "LLaMA", "Mistral", "GLM"]:
             return self.enc.decode(tokens[:context_length])
@@ -527,23 +552,25 @@ class LLMNeedleHaystackTester:
         if len(tokens) > context_length:
             context = self.decode_tokens(tokens, context_length)
         return context
-    
+
     def get_results(self):
         return self.testing_results
-    
+
     def print_start_test_summary(self):
-        print ("\n")
-        print ("Starting Needle In A Haystack Testing...")
-        print (f"- Model: {self.model_name}")
-        print (f"- Context Lengths: {len(self.context_lengths)}, Min: {min(self.context_lengths)}, Max: {max(self.context_lengths)}")
-        print (f"- Document Depths: {len(self.document_depth_percents)}, Min: {min(self.document_depth_percents)}%, Max: {max(self.document_depth_percents)}%")
-        print (f"- Needle: {self.needle.strip()}")
-        print ("\n\n")
+        print("\n")
+        print("Starting Needle In A Haystack Testing...")
+        print(f"- Model: {self.model_name}")
+        print(
+            f"- Context Lengths: {len(self.context_lengths)}, Min: {min(self.context_lengths)}, Max: {max(self.context_lengths)}")
+        print(
+            f"- Document Depths: {len(self.document_depth_percents)}, Min: {min(self.document_depth_percents)}%, Max: {max(self.document_depth_percents)}%")
+        print(f"- Needle: {self.needle.strip()}")
+        print("\n\n")
 
     def start_test(self, args):
         if self.print_ongoing_status:
             self.print_start_test_summary()
-        #asyncio.run(self.run_test())
+        # asyncio.run(self.run_test())
         self.run_test(args)
 
 
@@ -557,24 +584,25 @@ if __name__ == "__main__":
     parser.add_argument('--model_name_suffix', type=str, default=None, help='name of model')
     parser.add_argument('--model_provider', type=str, default="LLaMA", help='which model to use')
     parser.add_argument('--api_key', type=str, default="", help='OpenAI API Key')
-    parser.add_argument('--mask_topk', type=int, default=0, help='mask topk heads, input a negative value to mask random heads')
+    parser.add_argument('--mask_topk', type=int, default=0,
+                        help='mask topk heads, input a negative value to mask random heads')
     # parser = add_args(parser)
     args = parser.parse_args()
 
-    if(args.model_path is not None):
-        assert(args.model_name is None)
+    if (args.model_path is not None):
+        assert (args.model_name is None)
         model_name = args.model_path
-    else: 
-        assert(args.model_name is not None)
+    else:
+        assert (args.model_name is not None)
 
-    ht = LLMNeedleHaystackTester(model_name=model_name, 
+    ht = LLMNeedleHaystackTester(model_name=model_name,
                                  model_name_suffix=args.model_name_suffix,
                                  model_provider=args.model_provider,
                                  save_contexts=True,
                                  save_results=True,
                                  mask_topk=args.mask_topk,
-                                context_lengths_min=args.s_len,
-                                context_lengths_max=args.e_len,
+                                 context_lengths_min=args.s_len,
+                                 context_lengths_max=args.e_len,
                                  )
 
     ht.start_test(args)
