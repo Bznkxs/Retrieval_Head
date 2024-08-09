@@ -37,7 +37,7 @@ python -u needle_in_haystack.py --s_len 0 --e_len 128000\
 import os 
 import glob
 import json
-from transformers import AutoTokenizer, AutoConfig
+from transformers import AutoTokenizer, AutoConfig, AutoModelForCausalLM
 import sys
 import random
 sys.path.append("./faiss_attn/")
@@ -193,8 +193,12 @@ class LLMNeedleHaystackTester:
                        model_name,torch_dtype="auto",device_map='auto',use_flash_attention_2="flash_attention_2",trust_remote_code=True,
                     )
             else:
-                self.model_to_test = LlamaForCausalLM.from_pretrained(model_name,
-                    use_flash_attention_2="flash_attention_2", torch_dtype=torch.bfloat16,device_map='auto').eval()
+                # self.model_to_test = LlamaForCausalLM.from_pretrained(model_name,
+                #     use_flash_attention_2="flash_attention_2", torch_dtype=torch.bfloat16,device_map='auto').eval()
+                self.model_to_test = AutoModelForCausalLM.from_pretrained(model_name,
+                                                                          attn_implementation="flash_attention_2",
+                                                                          torch_dtype=torch.bfloat16,
+                                                                          device_map='auto').eval()
             if 'llama-2-7b-80k' in self.model_version:
                 scaling_factor = 10
                 reset_rope(self.model_to_test, model_max_train_len=81920, scaling_factor=scaling_factor)
