@@ -37,11 +37,11 @@ def main(folder_path):
             # Extracting the required fields
             document_depth = json_data.get("depth_percent", None)
             context_length = json_data.get("context_length", None)
-            # score = json_data.get("score", None)
+            score = json_data.get("score", None)
             model_response = json_data.get("model_response", None).lower()
             needle = json_data.get("needle", None).lower()
             expected_answer = "eat a sandwich and sit in Dolores Park on a sunny day.".lower().split()
-            score = len(set(model_response.split()).intersection(set(expected_answer))) / len(expected_answer)
+            # score = len(set(model_response.split()).intersection(set(expected_answer))) / len(expected_answer)
             # Appending to the list
             data.append({
                 "Document Depth": document_depth,

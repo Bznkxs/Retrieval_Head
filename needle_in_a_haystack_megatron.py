@@ -56,16 +56,18 @@ import time
 import torch
 import requests
 
-def megatron_client_generate(url, prompt, tokens_to_generate):
+def megatron_client_generate(url, prompt_list, tokens_to_generate):
+    if prompt_list is None:
+        return None
     headers = {'Content-Type': 'application/json'}
 
-    data = {"prompts": [prompt], "tokens_to_generate": tokens_to_generate}
+    data = {"prompts": prompt_list, "tokens_to_generate": tokens_to_generate}
     response = requests.put(url, data=json.dumps(data), headers=headers)
 
     if response.status_code != 200:
         raise ValueError(f"Error {response.status_code}: {response.json()['message']}")
     else:
-        return response.json()['text'][0]
+        return response.json()['text']
 
 def megatron_client_tokenize(url, text):
     headers = {'Content-Type': 'application/json'}
@@ -138,7 +140,9 @@ class LLMNeedleHaystackTester:
                  final_context_length_buffer = 200,
                  seconds_to_sleep_between_completions = None,
                  print_ongoing_status = True,
-                 device = "auto"):
+                 device = "auto",
+                 batch_size = 1
+                 ):
         """
         :param needle: The needle to be found in the haystack. Default is None.
         :param haystack_dir: The directory of text files to use as background context (or a haystack) in which the needle is to be found. Default is Paul Graham Essays.
@@ -184,6 +188,7 @@ class LLMNeedleHaystackTester:
         self.head_counter = defaultdict(list)
         self.mask_topk = mask_topk
         self.service_url = service_url
+        self.batch_size = batch_size
 
         if ("/" in model_name):
             self.model_version = model_name.split("/")[-1]
@@ -234,7 +239,15 @@ class LLMNeedleHaystackTester:
         self.enc = WebTokenizer(self.service_url)
 
         self.model_version += "_" + self.model_provider
-        self.model_to_test = partial(megatron_client_generate, get_url(self.service_url, "generate"))
+
+        def model_wrapping_for_batch_pretender(prompt_list, tokens_to_generate):
+            generation = megatron_client_generate(get_url(self.service_url, "generate"), prompt_list, tokens_to_generate)
+            if generation is not None:
+                self._model_output_buffer = generation
+            first_sample, self._model_output_buffer = self._model_output_buffer[0], self._model_output_buffer[1:]
+            return first_sample
+
+        self.model_to_test = model_wrapping_for_batch_pretender
 
         self.model_to_test_description = model_name
 
@@ -329,20 +342,16 @@ class LLMNeedleHaystackTester:
         else:
             block_list = self.construct_random_head(-self.mask_topk)
             save_name = f"{self.model_version}_block_random{-self.mask_topk}"
-        context = self.generate_context(context_length, depth_percent)
-        question = f"Based on the content of the book, Question: {self.retrieval_question}\nAnswer:"
-        input_context = context + question
-        input_ids = self.enc.tokenize(input_context)
+        context, input_ids = self.generate_input_ids_pretender(context_length, depth_percent)
+
 
         test_start_time = time.time()
 
         self.real_needle = "eat a sandwich and sit in Dolores Park on a sunny day"
-        #self.prompt_ids = torch.concat([context_ids, question_ids], dim=1)[0, :]
         self.prompt_ids = input_ids
 
-        self.needle_start, self.needle_end = self.find_needle_idx(self.real_needle)
         with torch.no_grad():
-            output = self.model_to_test(prompt=input_ids, tokens_to_generate=50)
+            output = self.model_to_test(prompt_list=context, tokens_to_generate=50)
             response = self.enc.detokenize(output).strip()
 
         test_end_time = time.time()
@@ -419,6 +428,34 @@ class LLMNeedleHaystackTester:
         context = self.insert_needle(context, depth_percent, context_length)
 
         return context
+
+    def _batch_generate_input_ids(self, context_length, depth_percent=0, max_length=-1):
+        context = self.read_context_files()
+        context = self.encode_and_trim(context, context_length)
+        generated_contexts = []
+        for _depth_percent in self.document_depth_percents:
+            if _depth_percent < depth_percent - 1e-5:
+                continue
+            context = self.insert_needle(context, _depth_percent, context_length)
+            question = f"Based on the content of the book, Question: {self.retrieval_question}\nAnswer:"
+            input_context = context + question
+            input_ids = self.enc.tokenize(input_context)
+            generated_contexts.append(input_ids)
+            if len(generated_contexts) == max_length:
+                break
+        return generated_contexts
+
+    def generate_input_ids_pretender(self, context_length, depth_percent):
+        i = 0
+        for _depth_percent in self.document_depth_percents:
+            if _depth_percent >= depth_percent - 1e-5:
+                break
+            i += 1
+        if i == 0:
+            self.batch_input = self._batch_generate_input_ids(context_length)
+        if i % self.batch_size == 0:
+            return self.batch_input[i: i + self.batch_size], self.batch_input[i]
+        return None, self.batch_input[i]
 
     def encode_text_to_tokens(self, text):
         return self.enc.tokenize(text)
@@ -539,6 +576,7 @@ if __name__ == "__main__":
     parser.add_argument('--num_intervals', type=int, default=40, help='number of intervals of the test')
     parser.add_argument('--device', type=str, default="auto", help="device")
     parser.add_argument('--service_url', type=str, default="localhost:5000", help="service url")
+    parser.add_argument("--batch_size", type=int, default=1, help="batch size")
     # parser = add_args(parser)
     args = parser.parse_args()
 
@@ -559,7 +597,8 @@ if __name__ == "__main__":
                                 context_lengths_max=args.e_len,
                                 context_lengths_num_intervals=args.num_intervals,
                                 device=args.device,
-                                service_url=args.service_url
+                                service_url=args.service_url,
+                                 batch_size=args.batch_size
       )
 
     ht.start_test(args)
