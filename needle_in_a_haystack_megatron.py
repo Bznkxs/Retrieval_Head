@@ -38,8 +38,6 @@ import os
 import glob
 import json
 from functools import partial
-
-from transformers import AutoTokenizer, AutoConfig, AutoModelForCausalLM
 import sys
 import random
 
@@ -53,43 +51,57 @@ scorer = rouge_scorer.RougeScorer(['rouge1', 'rougeL'], use_stemmer=True)
 from datetime import datetime, timezone
 from collections import defaultdict
 import time
-import torch
 import requests
 
 def megatron_client_generate(url, prompt_list, tokens_to_generate):
     if prompt_list is None:
         return None
     headers = {'Content-Type': 'application/json'}
-
-    data = {"prompts": prompt_list, "tokens_to_generate": tokens_to_generate}
+    # print("Generate", len(prompt_list))
+    data = {"prompts": prompt_list, "tokens_to_generate": tokens_to_generate, "top_k": 1,
+            "ignore_special_tokens": True, "random_seed": 0}
     response = requests.put(url, data=json.dumps(data), headers=headers)
 
     if response.status_code != 200:
-        raise ValueError(f"Error {response.status_code}: {response.json()['message']}")
+        raise ValueError(f"Error {response.status_code}: {response.json()}")
     else:
         return response.json()['text']
 
-def megatron_client_tokenize(url, text):
+def megatron_client_tokenize(url, text, **kwargs):
     headers = {'Content-Type': 'application/json'}
-
+    # print("Tokenize 1")
     data = {"texts": [text]}
+    # add kwargs to data
+    for key, value in kwargs.items():
+        data[key] = value
+
     response = requests.put(url, data=json.dumps(data), headers=headers)
 
     if response.status_code != 200:
-        raise ValueError(f"Error {response.status_code}: {response.json()['message']}")
+        raise ValueError(f"Error {response.status_code}: {response.json()}")
     else:
         return response.json()['token_ids'][0]
 
 def megatron_client_detokenize(url, tokens):
     headers = {'Content-Type': 'application/json'}
-
+    # print("Detokenize 1")
     data = {"tokens": [tokens]}
     response = requests.put(url, data=json.dumps(data), headers=headers)
 
     if response.status_code != 200:
-        raise ValueError(f"Error {response.status_code}: {response.json()['message']}")
+        raise ValueError(f"Error {response.status_code}: {response.json()}")
     else:
         return response.json()['texts'][0]
+
+def megatron_client_modify_window_size(url, window_size):
+    headers = {'Content-Type': 'application/json'}
+    data = {"window_size": window_size}
+    response = requests.put(url, data=json.dumps(data), headers=headers)
+
+    if response.status_code != 200:
+        raise ValueError(f"Error {response.status_code}: {response.json()}")
+    else:
+        return
 
 def get_url(base_url, request_type):
     if request_type == "generate":
@@ -98,6 +110,8 @@ def get_url(base_url, request_type):
         return f"http://{base_url}/api/tokenize"
     elif request_type == "detokenize":
         return f"http://{base_url}/api/detokenize"
+    elif request_type == "modify_window_size":
+        return f"http://{base_url}/api/modify_window_size"
     else:
         raise ValueError("Invalid request type. Must be 'generate', 'tokenize', or 'detokenize'.")
 
@@ -107,6 +121,9 @@ def reset_rope(model, model_max_train_len, scaling_factor):
         l.self_attn.rotary_emb._set_cos_sin_cache(seq_len=model_max_train_len,
                                                   device=l.self_attn.rotary_emb.inv_freq.device, dtype=torch.float32)
     return
+
+
+
 
 
 class LLMNeedleHaystackTester:
@@ -141,7 +158,8 @@ class LLMNeedleHaystackTester:
                  seconds_to_sleep_between_completions = None,
                  print_ongoing_status = True,
                  device = "auto",
-                 batch_size = 1
+                 batch_size = 1,
+                 window_size="None"
                  ):
         """
         :param needle: The needle to be found in the haystack. Default is None.
@@ -189,12 +207,15 @@ class LLMNeedleHaystackTester:
         self.mask_topk = mask_topk
         self.service_url = service_url
         self.batch_size = batch_size
+        self.window_size = [int(window_size), 0] if window_size != "None" else None
+        megatron_client_modify_window_size(get_url(self.service_url, "modify_window_size"), self.window_size)
 
         if ("/" in model_name):
             self.model_version = model_name.split("/")[-1]
         else:
             self.model_version = model_name
         if (model_name_suffix is not None): self.model_version += "_" + model_name_suffix
+        if (window_size is not None): self.model_version += f"_window_{window_size}"
 
         if context_lengths is None:
             if context_lengths_min is None or context_lengths_max is None or context_lengths_num_intervals is None:
@@ -231,8 +252,8 @@ class LLMNeedleHaystackTester:
             def __init__(self, url):
                 self.url = url
 
-            def tokenize(self, text):
-                return megatron_client_tokenize(get_url(self.url, "tokenize"), text)
+            def tokenize(self, text, **kwargs):
+                return megatron_client_tokenize(get_url(self.url, "tokenize"), text, **kwargs)
 
             def detokenize(self, tokens):
                 return megatron_client_detokenize(get_url(self.url, "detokenize"), tokens)
@@ -343,16 +364,18 @@ class LLMNeedleHaystackTester:
             block_list = self.construct_random_head(-self.mask_topk)
             save_name = f"{self.model_version}_block_random{-self.mask_topk}"
         context, input_ids = self.generate_input_ids_pretender(context_length, depth_percent)
-
+        # context = self.generate_context(context_length, depth_percent)
+        # question = f"Based on the content of the book, Question: {self.retrieval_question}\nAnswer:"
+        # context = context + question
+        # input_ids = context
 
         test_start_time = time.time()
 
         self.real_needle = "eat a sandwich and sit in Dolores Park on a sunny day"
         self.prompt_ids = input_ids
 
-        with torch.no_grad():
-            output = self.model_to_test(prompt_list=context, tokens_to_generate=50)
-            response = self.enc.detokenize(output).strip()
+        output = self.model_to_test(prompt_list=context, tokens_to_generate=50)
+        response = output.strip()
 
         test_end_time = time.time()
         test_elapsed_time = test_end_time - test_start_time
@@ -367,7 +390,8 @@ class LLMNeedleHaystackTester:
             'model_response': response,
             'score': score,
             'test_duration_seconds': test_elapsed_time,
-            'test_timestamp_utc': datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S%z')
+            'test_timestamp_utc': datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S%z'),
+            'input': input_ids,
         }
 
         self.testing_results.append(results)
@@ -432,15 +456,20 @@ class LLMNeedleHaystackTester:
     def _batch_generate_input_ids(self, context_length, depth_percent=0, max_length=-1):
         context = self.read_context_files()
         context = self.encode_and_trim(context, context_length)
+
         generated_contexts = []
+        generated_ids = []
         for _depth_percent in self.document_depth_percents:
             if _depth_percent < depth_percent - 1e-5:
                 continue
-            context = self.insert_needle(context, _depth_percent, context_length)
-            question = f"Based on the content of the book, Question: {self.retrieval_question}\nAnswer:"
-            input_context = context + question
+            # print("Generate", _depth_percent)
+            modified_context = self.insert_needle(context, _depth_percent, context_length)
+            question = f" Based on the content of the book, Question: {self.retrieval_question}\nAnswer:"
+            input_context = modified_context + question
             input_ids = self.enc.tokenize(input_context)
-            generated_contexts.append(input_ids)
+            generated_contexts.append(input_context)
+            generated_ids.append(input_ids)
+            # print("Generated contexts:", len(generated_contexts))
             if len(generated_contexts) == max_length:
                 break
         return generated_contexts
@@ -448,9 +477,12 @@ class LLMNeedleHaystackTester:
     def generate_input_ids_pretender(self, context_length, depth_percent):
         i = 0
         for _depth_percent in self.document_depth_percents:
+            # print("Checking %f" % _depth_percent)
+            # print("Against %f" % depth_percent)
             if _depth_percent >= depth_percent - 1e-5:
                 break
             i += 1
+        # print("Got i=", i)
         if i == 0:
             self.batch_input = self._batch_generate_input_ids(context_length)
         if i % self.batch_size == 0:
@@ -458,11 +490,13 @@ class LLMNeedleHaystackTester:
         return None, self.batch_input[i]
 
     def encode_text_to_tokens(self, text):
+        # print("Encoding")
         return self.enc.tokenize(text)
     def insert_needle(self, context, depth_percent, context_length):
         tokens_needle = self.encode_text_to_tokens(self.needle)
+        # print("tokens_needle")
         tokens_context = self.encode_text_to_tokens(context)
-
+        # print("tokens_context")
         # Reducing the context length by 150 buffer. This is to account for system message, the user question, and response.
         context_length -= self.final_context_length_buffer
 
@@ -483,6 +517,7 @@ class LLMNeedleHaystackTester:
 
             # We want to make sure that we place our needle at a sentence break so we first see what token a '.' is
             period_token = get_token_memoization(self.enc, '.')
+            print("Period token:", period_token)
             if period_token in [29889, 869]:
                 period_tokens = [29889, 869]
             elif period_token in [88946, 13]:
@@ -504,11 +539,15 @@ class LLMNeedleHaystackTester:
             # Now we have a needle in a haystack
             tokens_new_context += tokens_needle + tokens_context[insertion_point:]
 
+        print("Context length after needle insertion:", len(tokens_new_context))
+
         # Convert back to a string and return it
+        # print("")
         new_context = self.decode_tokens(tokens_new_context)
         return new_context
 
     def get_context_length_in_tokens(self, context):
+        # print("Getting context length in tokens")
         return len(self.encode_text_to_tokens(context))
 
     def read_context_files(self):
@@ -525,11 +564,14 @@ class LLMNeedleHaystackTester:
         return self.encode_text_to_tokens(context)
 
     def decode_tokens(self, tokens, context_length=None):
-        return self.enc.detokenize(tokens)[:context_length]
+        return self.enc.detokenize(tokens[:context_length])
 
     def encode_and_trim(self, context, context_length):
+        # print("encode_and_trim")
+        # print("get tokens")
         tokens = self.get_tokens_from_context(context)
         if len(tokens) > context_length:
+            # print("decode_tokens")
             context = self.decode_tokens(tokens, context_length)
         return context
 
@@ -558,7 +600,8 @@ token_dict = {}
 def get_token_memoization(enc, text):
     if text in token_dict:
         return token_dict[text]
-    token_dict[text] = enc.tokenize(text)
+    # print("get token by calling")
+    token_dict[text] = enc.tokenize(text, ignore_special_tokens=True)[0]
     return token_dict[text]
 
 
@@ -577,6 +620,7 @@ if __name__ == "__main__":
     parser.add_argument('--device', type=str, default="auto", help="device")
     parser.add_argument('--service_url', type=str, default="localhost:5000", help="service url")
     parser.add_argument("--batch_size", type=int, default=1, help="batch size")
+    parser.add_argument("--window_size", type=str, default="None", help="window size")
     # parser = add_args(parser)
     args = parser.parse_args()
 
@@ -598,7 +642,8 @@ if __name__ == "__main__":
                                 context_lengths_num_intervals=args.num_intervals,
                                 device=args.device,
                                 service_url=args.service_url,
-                                 batch_size=args.batch_size
+                                 batch_size=args.batch_size,
+                                 window_size=args.window_size
       )
 
     ht.start_test(args)
