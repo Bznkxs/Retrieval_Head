@@ -53,24 +53,33 @@ from collections import defaultdict
 import time
 import requests
 
-def megatron_client_generate(url, prompt_list, tokens_to_generate):
+def megatron_client_generate(url, prompt_list, tokens_to_generate, window_size=None):
     if prompt_list is None:
         return None
     headers = {'Content-Type': 'application/json'}
     # print("Generate", len(prompt_list))
-    data = {"prompts": prompt_list, "tokens_to_generate": tokens_to_generate, "top_k": 1,
-            "ignore_special_tokens": True, "random_seed": 0}
+    data = {"prompts": prompt_list, "tokens_to_generate": tokens_to_generate,
+            "ignore_special_tokens": True, "add_BOS": False, "random_seed": 0, "top_k": 1,
+            "window_size": window_size}  # for future implementation
     response = requests.put(url, data=json.dumps(data), headers=headers)
 
     if response.status_code != 200:
         raise ValueError(f"Error {response.status_code}: {response.json()}")
     else:
-        return response.json()['text']
+        try:
+            return response.json()['text']
+        except:
+            raise ValueError("Unclassified error in response:", response.json())
 
 def megatron_client_tokenize(url, text, **kwargs):
+    """
+    Tokenize one sequence.
+    url: url of backend
+    text: the sequence to tokenize
+    """
     headers = {'Content-Type': 'application/json'}
     # print("Tokenize 1")
-    data = {"texts": [text]}
+    data = {"texts": [text], "add_BOS": False}
     # add kwargs to data
     for key, value in kwargs.items():
         data[key] = value
@@ -85,7 +94,7 @@ def megatron_client_tokenize(url, text, **kwargs):
 def megatron_client_detokenize(url, tokens):
     headers = {'Content-Type': 'application/json'}
     # print("Detokenize 1")
-    data = {"tokens": [tokens]}
+    data = {"tokens": [tokens], "no_log": False}
     response = requests.put(url, data=json.dumps(data), headers=headers)
 
     if response.status_code != 200:
@@ -104,6 +113,7 @@ def megatron_client_modify_window_size(url, window_size):
         return
 
 def get_url(base_url, request_type):
+    base_url = base_url.strip()
     if request_type == "generate":
         return f"http://{base_url}/api"
     elif request_type == "tokenize":
@@ -113,7 +123,7 @@ def get_url(base_url, request_type):
     elif request_type == "modify_window_size":
         return f"http://{base_url}/api/modify_window_size"
     else:
-        raise ValueError("Invalid request type. Must be 'generate', 'tokenize', or 'detokenize'.")
+        raise ValueError("Invalid request type. Must be 'generate', 'tokenize', or 'detokenize', or 'modify_window_size'.")
 
 def reset_rope(model, model_max_train_len, scaling_factor):
     for l in model.model.layers:
@@ -121,9 +131,6 @@ def reset_rope(model, model_max_train_len, scaling_factor):
         l.self_attn.rotary_emb._set_cos_sin_cache(seq_len=model_max_train_len,
                                                   device=l.self_attn.rotary_emb.inv_freq.device, dtype=torch.float32)
     return
-
-
-
 
 
 class LLMNeedleHaystackTester:
@@ -209,7 +216,7 @@ class LLMNeedleHaystackTester:
         self.batch_size = batch_size
         self.window_size = [int(window_size), 0] if window_size != "None" else None
         megatron_client_modify_window_size(get_url(self.service_url, "modify_window_size"), self.window_size)
-
+        # NOTICE: it should be clear that each time an evaluator is created, the backend window size will change!
         if ("/" in model_name):
             self.model_version = model_name.split("/")[-1]
         else:
@@ -262,8 +269,9 @@ class LLMNeedleHaystackTester:
         self.model_version += "_" + self.model_provider
 
         def model_wrapping_for_batch_pretender(prompt_list, tokens_to_generate):
-            generation = megatron_client_generate(get_url(self.service_url, "generate"), prompt_list, tokens_to_generate)
-            if generation is not None:
+            if prompt_list is not None and len(getattr(self, "_model_output_buffer", [])) == 0:
+                generation = megatron_client_generate(get_url(self.service_url, "generate"), prompt_list, tokens_to_generate,
+                                                      window_size=self.window_size)  # for future
                 self._model_output_buffer = generation
             first_sample, self._model_output_buffer = self._model_output_buffer[0], self._model_output_buffer[1:]
             return first_sample
@@ -332,7 +340,9 @@ class LLMNeedleHaystackTester:
         for i in range(len(self.prompt_ids)):
 
             token_span = self.prompt_ids[i: i + span_len]
-            span_ids = set(token_span.tolist())
+            if not isinstance(token_span, list):
+                token_span = token_span.tolist()
+            span_ids = set(token_span)
             overlap = float(len(span_ids.intersection(set(needle_ids)))) / len(set(needle_ids))
             if (overlap > 0.9):
                 return i, i + span_len
@@ -366,7 +376,7 @@ class LLMNeedleHaystackTester:
         context, input_ids = self.generate_input_ids_pretender(context_length, depth_percent)
         # context = self.generate_context(context_length, depth_percent)
         # question = f"Based on the content of the book, Question: {self.retrieval_question}\nAnswer:"
-        # context = context + question
+        input_context = context
         # input_ids = context
 
         test_start_time = time.time()
@@ -374,8 +384,8 @@ class LLMNeedleHaystackTester:
         self.real_needle = "eat a sandwich and sit in Dolores Park on a sunny day"
         self.prompt_ids = input_ids
 
-        output = self.model_to_test(prompt_list=context, tokens_to_generate=50)
-        response = output.strip()
+        output = self.model_to_test(prompt_list=input_context, tokens_to_generate=50)
+        response = output.replace(input_ids.strip(), "").strip()
 
         test_end_time = time.time()
         test_elapsed_time = test_end_time - test_start_time
@@ -439,7 +449,7 @@ class LLMNeedleHaystackTester:
                         return True
         return False
 
-    def generate_context(self, context_length, depth_percent):
+    def _batch_generate_input_ids(self, context_length, depth_percent=0, max_length=-1):
         # Load up tiktoken so we navigate tokens more easily
 
         # Get your Paul Graham files loaded into a string
@@ -447,16 +457,8 @@ class LLMNeedleHaystackTester:
 
         # Truncate the Paul Graham essays to the context length you desire
         context = self.encode_and_trim(context, context_length)
-
+        print("Context:", context[:100])
         # Insert your random statement according to your depth percent
-        context = self.insert_needle(context, depth_percent, context_length)
-
-        return context
-
-    def _batch_generate_input_ids(self, context_length, depth_percent=0, max_length=-1):
-        context = self.read_context_files()
-        context = self.encode_and_trim(context, context_length)
-
         generated_contexts = []
         generated_ids = []
         for _depth_percent in self.document_depth_percents:
@@ -466,9 +468,9 @@ class LLMNeedleHaystackTester:
             modified_context = self.insert_needle(context, _depth_percent, context_length)
             question = f" Based on the content of the book, Question: {self.retrieval_question}\nAnswer:"
             input_context = modified_context + question
-            input_ids = self.enc.tokenize(input_context)
+            # input_ids = self.enc.tokenize(input_context, add_BOS=True)  # set to true
             generated_contexts.append(input_context)
-            generated_ids.append(input_ids)
+            # generated_ids.append(input_ids)
             # print("Generated contexts:", len(generated_contexts))
             if len(generated_contexts) == max_length:
                 break
@@ -490,13 +492,11 @@ class LLMNeedleHaystackTester:
         return None, self.batch_input[i]
 
     def encode_text_to_tokens(self, text):
-        # print("Encoding")
         return self.enc.tokenize(text)
     def insert_needle(self, context, depth_percent, context_length):
         tokens_needle = self.encode_text_to_tokens(self.needle)
-        # print("tokens_needle")
         tokens_context = self.encode_text_to_tokens(context)
-        # print("tokens_context")
+
         # Reducing the context length by 150 buffer. This is to account for system message, the user question, and response.
         context_length -= self.final_context_length_buffer
 
@@ -544,6 +544,7 @@ class LLMNeedleHaystackTester:
         # Convert back to a string and return it
         # print("")
         new_context = self.decode_tokens(tokens_new_context)
+        print("New context:", new_context[:100])
         return new_context
 
     def get_context_length_in_tokens(self, context):
@@ -618,7 +619,7 @@ if __name__ == "__main__":
     parser.add_argument('--mask_topk', type=int, default=0, help='mask topk heads, input a negative value to mask random heads')
     parser.add_argument('--num_intervals', type=int, default=40, help='number of intervals of the test')
     parser.add_argument('--device', type=str, default="auto", help="device")
-    parser.add_argument('--service_url', type=str, default="localhost:5000", help="service url")
+    parser.add_argument('--url', type=str, default="localhost:5000", help="service url")
     parser.add_argument("--batch_size", type=int, default=1, help="batch size")
     parser.add_argument("--window_size", type=str, default="None", help="window size")
     # parser = add_args(parser)
@@ -641,7 +642,7 @@ if __name__ == "__main__":
                                 context_lengths_max=args.e_len,
                                 context_lengths_num_intervals=args.num_intervals,
                                 device=args.device,
-                                service_url=args.service_url,
+                                service_url=args.url,
                                  batch_size=args.batch_size,
                                  window_size=args.window_size
       )

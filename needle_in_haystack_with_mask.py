@@ -93,7 +93,8 @@ class LLMNeedleHaystackTester:
                  save_contexts = True,
                  final_context_length_buffer = 200,
                  seconds_to_sleep_between_completions = None,
-                 print_ongoing_status = True):
+                 print_ongoing_status = True,
+                 device = "auto"):
         """        
         :param needle: The needle to be found in the haystack. Default is None.
         :param haystack_dir: The directory of text files to use as background context (or a haystack) in which the needle is to be found. Default is Paul Graham Essays.
@@ -166,7 +167,7 @@ class LLMNeedleHaystackTester:
 
         if document_depth_percent_interval_type not in [None, "linear", "sigmoid"]:
             raise ValueError("document_depth_percent_interval_type must be either None, 'linear' or 'sigmoid'. If you'd like your own distribution give a list of ints in via document_depth_percent_intervals")
-        
+        self.device = device
         self.model_name = model_name
 
         if(self.model_provider not in ["OpenAI", "Anthropic"]):
@@ -199,9 +200,9 @@ class LLMNeedleHaystackTester:
                                                                           attn_implementation="flash_attention_2",
                                                                           torch_dtype=torch.bfloat16,
                                                                           device_map='auto').eval()
-            if 'llama-2-7b-80k' in self.model_version:
-                scaling_factor = 10
-                reset_rope(self.model_to_test, model_max_train_len=81920, scaling_factor=scaling_factor)
+            #if 'llama-2-7b-80k' in self.model_version:
+            #    scaling_factor = 10
+            #    reset_rope(self.model_to_test, model_max_train_len=81920, scaling_factor=scaling_factor)
         else: 
             self.model_to_test = OpenAI(api_key=openai_api_key)
             if(self.model_provider == "OpenAI"):
@@ -314,6 +315,12 @@ class LLMNeedleHaystackTester:
                 results.append((l, h))
         return results
     def evaluate_and_log(self, context_length, depth_percent):
+        if self.save_results:
+            if self.result_exists(context_length, depth_percent):
+                print("result exists, skipping")
+                return
+            else:
+                print("result does not exist, testing")
         # Checks to see if you've already checked a length/percent/version.
         # This helps if the program stop running and you want to restart later
         # Go generate the required length context and place your needle statement in
@@ -398,7 +405,7 @@ class LLMNeedleHaystackTester:
         Checks to see if a result has already been evaluated or not
         """
 
-        results_dir = 'results/' + self.model_version
+        results_dir = 'results/graph/' + self.model_version
         print("Searching existing results at %s" % results_dir)
         if not os.path.exists(results_dir):
             return False
@@ -558,6 +565,8 @@ if __name__ == "__main__":
     parser.add_argument('--model_provider', type=str, default="LLaMA", help='which model to use')
     parser.add_argument('--api_key', type=str, default="", help='OpenAI API Key')
     parser.add_argument('--mask_topk', type=int, default=0, help='mask topk heads, input a negative value to mask random heads')
+    parser.add_argument('--num_intervals', type=int, default=40, help='number of intervals of the test')
+    parser.add_argument('--device', type=str, default="auto", help="device")
     # parser = add_args(parser)
     args = parser.parse_args()
 
@@ -575,6 +584,8 @@ if __name__ == "__main__":
                                  mask_topk=args.mask_topk,
                                 context_lengths_min=args.s_len,
                                 context_lengths_max=args.e_len,
+                                context_lengths_num_intervals=args.num_intervals,
+                                device=args.device,
                                  )
 
     ht.start_test(args)
