@@ -166,6 +166,7 @@ class LlamaRotaryEmbedding(nn.Module):
         emb = torch.cat((freqs, freqs), dim=-1)
         self.register_buffer("cos_cached", emb.cos().to(dtype), persistent=False)
         self.register_buffer("sin_cached", emb.sin().to(dtype), persistent=False)
+        #print(f"Angle for position {seq_len-1} at dim 67:", emb[seq_len-1, 67])
 
     def forward(self, x, seq_len=None):
         # x: [bs, num_attention_heads, seq_len, head_size]
@@ -221,35 +222,6 @@ class LlamaDynamicNTKScalingRotaryEmbedding(LlamaRotaryEmbedding):
         emb = torch.cat((freqs, freqs), dim=-1)
         self.register_buffer("cos_cached", emb.cos().to(dtype), persistent=False)
         self.register_buffer("sin_cached", emb.sin().to(dtype), persistent=False)
-
-class ExtendedRotaryEmbedding(LlamaRotaryEmbedding):
-    def __init__(self, dim, max_position_embeddings=2048, base=10000, device=None):
-        super().__init__(dim, max_position_embeddings, base, device)
-        self.apply_scaling()
-
-    def apply_scaling(self):
-        freqs = self.inv_freq
-        scale_factor = 8
-        low_freq_factor = 1
-        high_freq_factor = 4
-        old_context_len = 8192
-
-        low_freq_wavelen = old_context_len / low_freq_factor
-        high_freq_wavelen = old_context_len / high_freq_factor
-        new_freqs = []
-        for freq in freqs:
-            wavelen = 2 * math.pi / freq
-            if wavelen < high_freq_wavelen:
-                new_freqs.append(freq)
-            elif wavelen > low_freq_wavelen:
-                new_freqs.append(freq / scale_factor)
-            else:
-                assert low_freq_wavelen != high_freq_wavelen
-                smooth = (old_context_len / wavelen - low_freq_factor) / (
-                    high_freq_factor - low_freq_factor)
-                new_freqs.append((1 - smooth) * freq / scale_factor +
-                                 smooth * freq)
-        self.inv_freq = torch.tensor(new_freqs, dtype=freqs.dtype, device=freqs.device)
 
 
 def rotate_half(x):
@@ -378,11 +350,7 @@ class LlamaAttention(nn.Module):
                 base=self.rope_theta,
             )
         else:
-            if "type" in self.config.rope_scaling:
-                scaling_type = self.config.rope_scaling["type"]
-            elif "rope_type" in self.config.rope_scaling:
-                scaling_type = self.config.rope_scaling["rope_type"]
-
+            scaling_type = self.config.rope_scaling["type"]
             scaling_factor = self.config.rope_scaling["factor"]
             if scaling_type == "linear":
                 self.rotary_emb = LlamaLinearScalingRotaryEmbedding(
@@ -396,12 +364,6 @@ class LlamaAttention(nn.Module):
                     self.head_dim,
                     max_position_embeddings=self.max_position_embeddings,
                     scaling_factor=scaling_factor,
-                    base=self.rope_theta,
-                )
-            elif scaling_type == "llama3":
-                self.rotary_emb = ExtendedRotaryEmbedding(
-                    self.head_dim,
-                    max_position_embeddings=self.max_position_embeddings,
                     base=self.rope_theta,
                 )
             else:
