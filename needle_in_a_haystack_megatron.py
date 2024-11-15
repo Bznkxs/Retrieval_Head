@@ -59,7 +59,7 @@ import requests
 def megatron_client_generate(url, prompt, tokens_to_generate):
     headers = {'Content-Type': 'application/json'}
 
-    data = {"prompts": [prompt], "tokens_to_generate": tokens_to_generate, "add_BOS": False, "random_seed": 0, "top_k": 1}
+    data = {"prompts": [prompt], "tokens_to_generate": tokens_to_generate, "add_BOS": True, "random_seed": 0, "top_k": 1}
     response = requests.put(url, data=json.dumps(data), headers=headers)
 
     if response.status_code != 200:
