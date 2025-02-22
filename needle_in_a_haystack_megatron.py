@@ -78,7 +78,6 @@ def megatron_client_tokenize(url, text, **kwargs):
     text: the sequence to tokenize
     """
     headers = {'Content-Type': 'application/json'}
-    # print("Tokenize 1")
     data = {"texts": [text], "add_BOS": False}
     # add kwargs to data
     for key, value in kwargs.items():
@@ -192,7 +191,8 @@ class LLMNeedleHaystackTester:
         :param anthropic_api_key: The API key for Anthropic. Default is None.
         :param model_name: The name of the model. Default is 'gpt-4-1106-preview'.
         :param seconds_to_sleep_between_completions: The number of seconds to sleep between completions. Default is None.
-        :param print_ongoing_status: Whether or not to print the ongoing status. Default is True.
+        :param print_ongoing_status: Whether to print the ongoing status. Default is True.
+        :param window_size: The window size for the model. Default is None.
         """
         if not needle or not haystack_dir or not retrieval_question:
             raise ValueError("Needle, haystack, and retrieval_question must be provided.")

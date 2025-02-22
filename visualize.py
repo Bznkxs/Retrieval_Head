@@ -135,7 +135,7 @@ def main(folder_path):
     f = plt.figure(figsize=(17.5, 8))  # Can adjust these dimensions as needed
     heatmap = sns.heatmap(
         pivot_table,
-        vmin=0, vmax=1,
+        vmin=0, vmax=100,
         cmap=cmap,
         cbar_kws={'label': 'Score'},
         linewidths=0.5,  # Adjust the thickness of the grid lines here
@@ -219,4 +219,5 @@ if __name__ == "__main__":
         ]
     print(folder_paths)
     for folder_path in folder_paths:
+        print(folder_path)
         main(folder_path)
