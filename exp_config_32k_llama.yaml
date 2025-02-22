@@ -1,0 +1,22 @@
+global_args:
+  exist_on_existence: true
+  exp_name_suffix: 32k_llama
+  rope_theta: 1000000
+  batch_size: 4m
+  auto_range: true
+  full_test: true
+  save_base_path: /u/yufengd4/work/models
+  model_type: llama
+list:
+  - model_path: /work/nvme/bbvf/mtian8/LLM/data/checkpoint_long_32k_4096
+    training_step: 300
+  - model_path: /work/nvme/bbvf/mtian8/LLM/data/checkpoint_long_32k_4096_noclip_noshuffle
+    training_step: 1000
+  - model_path: /work/nvme/bbvf/mtian8/LLM/data/checkpoint_long_32k_8192_noclip
+    rope_theta: 5000000
+    training_step: 1000
+  - model_path:  /work/nvme/bbvf/mtian8/LLM/data/checkpoint_long_32k_4096_noclip_shuffle
+    training_step: 1000
+
+
+

@@ -1,11 +1,7 @@
 
-import pandas as pd
-import seaborn as sns
-import matplotlib.pyplot as plt
-from matplotlib.colors import LinearSegmentedColormap
-import pandas as pd
 import json
 import glob
+import math
 import sys
 import os
 # FOLDER_PATH = "results/mask_0.2_0.2_rescale_True/"
@@ -22,6 +18,9 @@ def main(folder_path):
         # extract the last part of the path
         model_name = os.path.basename(os.path.normpath(folder_path))
     else: model_name = MODEL_NAME
+    print()
+    print()
+    print("====================================================")
     print("model_name = %s" % model_name)
 
     # Using glob to find all json files in the directory
@@ -34,6 +33,11 @@ def main(folder_path):
     data = []
     hor_score_map = {}
     ver_score_map = {}
+
+    score_divisions = {}
+    divisions_h = [32768, 65536, 131072]
+    divisions_v = [2048, 4096]
+
     # Iterating through each file and extract the 3 columns we need
     for file in json_files:
         with open(file, 'r') as f:
@@ -51,21 +55,44 @@ def main(folder_path):
             ver_score_map[document_depth]["sum"] += score
             ver_score_map[document_depth]["count"] += 1
 
-            model_response = json_data.get("model_response", None).lower()
-            needle = json_data.get("needle", None).lower()
-            expected_answer = "eat a sandwich and sit in Dolores Park on a sunny day.".lower().split()
-            # score = len(set(model_response.split()).intersection(set(expected_answer))) / len(expected_answer)
-            # Appending to the list
-            data.append({
-                "Document Depth": document_depth,
-                "Context Length": context_length,
-                "Score": score
-            })
+            for i_h in divisions_h:
+                if context_length <= i_h:
+                    for j_v in divisions_v:
+                        if document_depth <= j_v:
+                            if (i_h, j_v) not in score_divisions:
+                                score_divisions[(i_h, j_v)] = {"sum": 0, "count": 0}
+                            score_divisions[(i_h, j_v)]["sum"] += score
+                            score_divisions[(i_h, j_v)]["count"] += 1
+                            break
+                    break
+
+    for k in score_divisions:
+        if score_divisions[k]["count"] == 0:
+            score_divisions[k] = math.nan
+        else:
+            score_divisions[k] = score_divisions[k]["sum"] / score_divisions[k]["count"]
+
+    print(end="\t", )
+    for h in divisions_h:
+        print(f"{h//1024}k\t", end="")
+    print()
+    print("-----------------------------------------------------------")
+    for v in divisions_v:
+        print(f"{v//1024}k:\t", end="")
+        for h in divisions_h:
+            print(f"{score_divisions.get((h, v), math.nan)}\t", end="")
+        print()
+
+
 
     # calculate average score of 0~32768, 32769~65536, 65537~131072
-    avg_score = {'32k': 0., '64k': 0., '128k': 0.}
-    count = {'32k': 0., '64k': 0., '128k': 0.}
+    avg_score = {'32k': 0., '64k': 0., '128k': 0., 'overall': 0}
+    count = {'32k': 0., '64k': 0., '128k': 0., 'overall': 0}
+
     for k, v in hor_score_map.items():
+        avg_score['overall'] += v['sum']
+        count['overall'] += v['count']
+
         if k <= 32768:
             avg_score['32k'] += v['sum']
             count['32k'] += v['count']
@@ -78,15 +105,23 @@ def main(folder_path):
     if count['32k'] == 0: count['32k'] = 1
     if count['64k'] == 0: count['64k'] = 1
     if count['128k'] == 0: count['128k'] = 1
+    if count['overall'] == 0: count['overall'] = 1
     avg_score['32k'] /= count['32k']
     avg_score['64k'] /= count['64k']
     avg_score['128k'] /= count['128k']
+    avg_score['overall'] /= count['overall']
     print(avg_score)
 
-    avg_ver_score = {'8k': 0., '12k': 0., '16k': 0.}
-    count = {'8k': 0., '12k': 0., '16k': 0.}
+    avg_ver_score = {'2k': 0, '4k': 0, '8k': 0., '12k': 0., '16k': 0.}
+    count = {'2k': 0, '4k': 0, '8k': 0., '12k': 0., '16k': 0.}
     for k, v in ver_score_map.items():
-        if k <= 8192:
+        if k <= 2048:
+            avg_ver_score['2k'] += v['sum']
+            count['2k'] += v['count']
+        elif k <= 4096:
+            avg_ver_score['4k'] += v['sum']
+            count['4k'] += v['count']
+        elif k <= 8192:
             avg_ver_score['8k'] += v['sum']
             count['8k'] += v['count']
         elif k <= 12288:
@@ -95,9 +130,13 @@ def main(folder_path):
         else:
             avg_ver_score['16k'] += v['sum']
             count['16k'] += v['count']
+    if count['2k'] == 0: count['2k'] = 1
+    if count['4k'] == 0: count['4k'] = 1
     if count['8k'] == 0: count['8k'] = 1
     if count['12k'] == 0: count['12k'] = 1
     if count['16k'] == 0: count['16k'] = 1
+    avg_ver_score['2k'] /= count['2k']
+    avg_ver_score['4k'] /= count['4k']
     avg_ver_score['8k'] /= count['8k']
     avg_ver_score['12k'] /= count['12k']
     avg_ver_score['16k'] /= count['16k']
@@ -105,69 +144,7 @@ def main(folder_path):
 
 
 
-    # Creating a DataFrame
-    df = pd.DataFrame(data)
-    # print(df)
-    try:
-        locations = list(df["Context Length"].unique())
-    except Exception as e:
-        print(e)
-        # exit()
-    locations.sort()
-    for li, l in enumerate(locations):
-        print(li, l)
-        if(l > PRETRAINED_LEN): break
-    pretrained_len = li
-
-    # print(df.head())
-    print("Overall score %.3f" % df["Score"].mean())
-
-
-
-    pivot_table = pd.pivot_table(df, values='Score', index=['Document Depth', 'Context Length'], aggfunc='mean').reset_index() # This will aggregate
-    pivot_table = pivot_table.pivot(index="Document Depth", columns="Context Length", values="Score") # This will turn into a proper pivot
-    print(pivot_table.iloc[:5, :50])
-
-    # Create a custom colormap. Go to https://coolors.co/ and pick cool colors
-    cmap = LinearSegmentedColormap.from_list("custom_cmap", ["#F0496E", "#EBB839", "#0CD79F"])
-
-    # Create the heatmap with better aesthetics
-    f = plt.figure(figsize=(17.5, 8))  # Can adjust these dimensions as needed
-    heatmap = sns.heatmap(
-        pivot_table,
-        vmin=0, vmax=1,
-        cmap=cmap,
-        cbar_kws={'label': 'Score'},
-        linewidths=0.5,  # Adjust the thickness of the grid lines here
-        linecolor='grey',  # Set the color of the grid lines
-        linestyle='--'
-    )
-
-
-    # More aesthetics
-    model_name_ = model_name
-    print("model_name_ = %s" % model_name_)
-    title = f'Pressure Testing {model_name_} \nFact Retrieval Across Context Lengths ("Needle In A HayStack")'
-    print("Title = %s" % title)
-    plt.title(title)  # Adds a title
-    plt.xlabel('Token Limit')  # X-axis label
-    plt.ylabel('Depth')  # Y-axis label
-    plt.xticks(rotation=45)  # Rotates the x-axis labels to prevent overlap
-    plt.yticks(rotation=0)  # Ensures the y-axis labels are horizontal
-    plt.tight_layout()  # Fits everything neatly into the figure area
-
-    # Add a vertical line at the desired column index
-    plt.axvline(x=pretrained_len + 0.8, color='white', linestyle='--', linewidth=4)
-
-    # add average score below the figure
-    plt.text(0, -1, f"Average score of 0~32k: {avg_score['32k']:.3f}", fontsize=12)
-    plt.text(0, -2, f"Average score of 32k~64k: {avg_score['64k']:.3f}", fontsize=12)
-    plt.text(0, -3, f"Average score of 64k~128k: {avg_score['128k']:.3f}", fontsize=12)
-
-
-    save_path = "img/%s.png" % model_name
-    print("saving at %s" % save_path)
-    plt.savefig(save_path, dpi=150)
+    print("====================================================")
     # save_path = "img/%s.1.png" % model_name
     # print("saving at %s" % save_path)
     # plt.savefig(save_path, dpi=150)

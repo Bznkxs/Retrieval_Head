@@ -387,7 +387,8 @@ def full_pipeline_for_multiple_models(experiment_yaml_file):
                 skip_step = 0
                 model_info = None
             model_info, rv, skip_step = full_pipeline_for_one_model(model_path, skip_step, model_info, **additional_information)
-            if rv != 0:
+            skip_error = additional_information.get("skip_error", False)
+            if rv != 0 and not skip_error:
                 print(f"Error in processing {model_path}: step {skip_step} failed. Please modify the yaml file "
                       f"Before proceeding. Then, press Enter to continue from step {skip_step} or "
                       f"input the number of a specific step to start over. Explanation of steps: {step_explanation()}")

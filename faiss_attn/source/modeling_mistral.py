@@ -20,6 +20,7 @@
 """ PyTorch Mistral model."""
 import inspect
 import math
+import os
 import warnings
 from typing import List, Optional, Tuple, Union, Any
 
@@ -63,6 +64,17 @@ if is_flash_attn_2_available():
 logger = logging.get_logger(__name__)
 
 _CONFIG_FOR_DOC = "MistralConfig"
+
+
+debug_used=True
+def debug(*args, **kwargs):
+    if debug_used:
+        print(*args, **kwargs)
+
+def change_debug(to):
+    global debug_used
+    debug_used = to
+    return debug_used
 
 
 # Copied from transformers.models.llama.modeling_llama._get_unpad_data
@@ -451,7 +463,8 @@ class MistralFlashAttention2(MistralAttention):
         # flash_attn<2.1 generates top-left aligned causal mask, while what is needed here is bottom-right alignement, that was made default for flash_attn>=2.1. This attribute is used to handle this difference. Reference: https://github.com/Dao-AILab/flash-attention/releases/tag/v2.1.0.
         # Beware that with flash_attn<2.1, using q_seqlen != k_seqlen (except for the case q_seqlen == 1) produces a wrong mask (top-left).
         self._flash_attn_uses_top_left_mask = not is_flash_attn_greater_or_equal_2_10()
-
+    def modify_window_size(self, window_size: int):
+        self.config.sliding_window = window_size
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -470,15 +483,23 @@ class MistralFlashAttention2(MistralAttention):
             # overwrite attention_mask with padding_mask
             attention_mask = kwargs.pop("padding_mask")
         bsz, q_len, _ = hidden_states.size()
-
+        debug("Layer norm hidden states:", hidden_states)
+        # if not os.path.exists("/u/yufengd4/faiss_layer_norm_hidden_states_fp16.txt"):
+        #     with open("/u/yufengd4/faiss_layer_norm_hidden_states_fp16.txt", "w") as f:
+        #         import json
+        #         json.dump(hidden_states.cpu().numpy().tolist(), f)
         query_states = self.q_proj(hidden_states)
         key_states = self.k_proj(hidden_states)
         value_states = self.v_proj(hidden_states)
+
 
         query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
         key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
         value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
 
+        debug("Query: ", query_states[..., :6])
+        debug("Key:   ", key_states[..., :6])
+        debug("value: ", value_states[..., :6])
         kv_seq_len = key_states.shape[-2]
         if past_key_value is not None:
             if self.layer_idx is None:
@@ -494,13 +515,20 @@ class MistralFlashAttention2(MistralAttention):
         cos, sin = self.rotary_emb(value_states, seq_len=rotary_seq_len)
 
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
-
+        debug("Cos: ", cos[..., :6])
+        debug("Sin: ", sin[..., :6])
+        debug("Post rope query: ", query_states[..., :6])
+        # if not os.path.exists("/u/yufengd4/faiss_post_rope_query.txt"):
+        #     with open("/u/yufengd4/faiss_post_rope_query.txt", "w") as f:
+        #         import json
+        #         json.dump(query_states.cpu().numpy().tolist(), f)
+        debug("Post rope key:   ", key_states[..., :6])
         use_sliding_windows = (
             _flash_supports_window_size
             and getattr(self.config, "sliding_window", None) is not None
             and kv_seq_len > self.config.sliding_window
         )
-
+        debug("Sliding windows: ", use_sliding_windows)
         if not _flash_supports_window_size:
             logger.warning_once(
                 "The current flash attention version does not support sliding window attention, for a more memory efficient implementation"
@@ -594,7 +622,7 @@ class MistralFlashAttention2(MistralAttention):
 
         if not output_attentions:
             attn_weights = None
-
+        debug("Attention output:", attn_output)
         return attn_output, attn_weights, past_key_value
 
     def _flash_attention_forward(
@@ -694,7 +722,11 @@ class MistralFlashAttention2(MistralAttention):
                     causal=causal,
                     window_size=(self.config.sliding_window, self.config.sliding_window),
                 )
-
+        debug("Core attention out", attn_output)
+        # if not os.path.exists("/u/yufengd4/faiss_attn_out_fp16.txt"):
+        #     with open("/u/yufengd4/faiss_attn_out_fp16.txt", "w") as f:
+        #         import json
+        #         json.dump(attn_output.cpu().numpy().tolist(), f)
         return attn_output
 
     def _upad_input(self, query_layer, key_layer, value_layer, attention_mask, query_length):
@@ -846,6 +878,9 @@ class MistralDecoderLayer(nn.Module):
         self.input_layernorm = MistralRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = MistralRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
+    def modify_window_size(self, window_size):
+        self.self_attn.modify_window_size(window_size)
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -876,6 +911,10 @@ class MistralDecoderLayer(nn.Module):
         """
 
         residual = hidden_states
+        # if not os.path.exists("/u/yufengd4/faiss_input_hidden_states_fp16.txt"):
+        #     with open("/u/yufengd4/faiss_input_hidden_states_fp16.txt", "w") as f:
+        #         import json
+        #         json.dump(hidden_states.cpu().numpy().tolist(), f)
 
         hidden_states = self.input_layernorm(hidden_states)
 
@@ -1060,6 +1099,16 @@ class MistralModel(MistralPreTrainedModel):
         # Initialize weights and apply final processing
         self.post_init()
 
+    def modify_window_size(self, window_size):
+        for layer in self.layers:
+            if hasattr(layer, "modify_window_size"):
+                # print("Original window size:", getattr(layer.self_attn.config, "sliding_window", None))
+                # print("Modify to window size:", window_size)
+                layer.modify_window_size(window_size)
+                # print("Modified window size:", getattr(layer.self_attn.config, "sliding_window", None))
+
+
+
     def get_input_embeddings(self):
         return self.embed_tokens
 
@@ -1167,7 +1216,10 @@ class MistralModel(MistralPreTrainedModel):
             kwargs={"block_list":block_list}
         else:
             kwargs={}
-        for decoder_layer in self.layers:
+
+        w = debug_used
+        # change_debug(w)
+        for lo, decoder_layer in enumerate(self.layers):
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
 
@@ -1200,9 +1252,16 @@ class MistralModel(MistralPreTrainedModel):
 
             if output_attentions:
                 all_self_attns += (layer_outputs[1],)
+            change_debug(False)
+            # if not os.path.exists(f"/u/yufengd4/faiss_output_hidden_states_{lo}.txt"):
+            #     with open(f"/u/yufengd4/faiss_output_hidden_states_{lo}.txt", "w") as f:
+            #         import json
+            #         json.dump(hidden_states.cpu().numpy().reshape(-1, 4096).tolist(), f)
 
         hidden_states = self.norm(hidden_states)
-
+        change_debug(w)
+        debug(f"Norm hidden_states: {hidden_states[..., :8]}, {hidden_states.shape}")
+        change_debug(False)
         # add hidden states from the last decoder layer
         if output_hidden_states:
             all_hidden_states += (hidden_states,)
@@ -1232,6 +1291,8 @@ class MistralForCausalLM(MistralPreTrainedModel):
 
         # Initialize weights and apply final processing
         self.post_init()
+
+
 
     def get_input_embeddings(self):
         return self.model.embed_tokens
@@ -1299,7 +1360,9 @@ class MistralForCausalLM(MistralPreTrainedModel):
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-
+        debug("Tokens:", len(input_ids[0]))
+        debug("First 5:", input_ids[0, :5])
+        debug("Last 5:", input_ids[0, -5:])
         # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
         outputs = self.model(
             input_ids=input_ids,
@@ -1315,9 +1378,12 @@ class MistralForCausalLM(MistralPreTrainedModel):
             block_list=block_list
         )
 
+
         hidden_states = outputs[0]
         logits = self.lm_head(hidden_states)
         logits = logits.float()
+        debug("Logits:", logits[..., -1, :10])
+        # input()
 
         loss = None
         if labels is not None:
@@ -1533,3 +1599,10 @@ class MistralForSequenceClassification(MistralPreTrainedModel):
             hidden_states=transformer_outputs.hidden_states,
             attentions=transformer_outputs.attentions,
         )
+
+class MyMistralForCausalLM(MistralForCausalLM):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        print("Hi!")
+    def call_mistral_model_modify_window_size(self, window_size):
+        self.model.modify_window_size(window_size)

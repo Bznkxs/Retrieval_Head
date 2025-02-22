@@ -60,7 +60,7 @@ def megatron_client_generate(url, prompt_list, tokens_to_generate, window_size=N
     # print("Generate", len(prompt_list))
     data = {"prompts": prompt_list, "tokens_to_generate": tokens_to_generate,
             "ignore_special_tokens": True, "add_BOS": False, "random_seed": 0, "top_k": 1,
-            "window_size": window_size}  # for future implementation
+            "window_size": window_size, "stop_on_eol": True, "prevent_newline_after_colon": True}  # for future implementation
     response = requests.put(url, data=json.dumps(data), headers=headers)
 
     if response.status_code != 200:
@@ -91,10 +91,11 @@ def megatron_client_tokenize(url, text, **kwargs):
     else:
         return response.json()['token_ids'][0]
 
-def megatron_client_detokenize(url, tokens):
+def megatron_client_detokenize(url, tokens, **kwargs):
     headers = {'Content-Type': 'application/json'}
     # print("Detokenize 1")
     data = {"tokens": [tokens], "no_log": False}
+    data.update(kwargs)
     response = requests.put(url, data=json.dumps(data), headers=headers)
 
     if response.status_code != 200:
@@ -262,8 +263,8 @@ class LLMNeedleHaystackTester:
             def tokenize(self, text, **kwargs):
                 return megatron_client_tokenize(get_url(self.url, "tokenize"), text, **kwargs)
 
-            def detokenize(self, tokens):
-                return megatron_client_detokenize(get_url(self.url, "detokenize"), tokens)
+            def detokenize(self, tokens, **kwargs):
+                return megatron_client_detokenize(get_url(self.url, "detokenize"), tokens, **kwargs)
         self.enc = WebTokenizer(self.service_url)
 
         self.model_version += "_" + self.model_provider
@@ -385,7 +386,8 @@ class LLMNeedleHaystackTester:
         self.prompt_ids = input_ids
 
         output = self.model_to_test(prompt_list=input_context, tokens_to_generate=50)
-        response = output.replace(input_ids.strip(), "").strip()
+        question = f"Based on the content of the book, Question: {self.retrieval_question}\nAnswer:"
+        response = output.split(question)[1].strip()
 
         test_end_time = time.time()
         test_elapsed_time = test_end_time - test_start_time
@@ -457,7 +459,7 @@ class LLMNeedleHaystackTester:
 
         # Truncate the Paul Graham essays to the context length you desire
         context = self.encode_and_trim(context, context_length)
-        print("Context:", context[:100])
+        # print("Context:", context[:100])
         # Insert your random statement according to your depth percent
         generated_contexts = []
         generated_ids = []
@@ -466,8 +468,11 @@ class LLMNeedleHaystackTester:
                 continue
             # print("Generate", _depth_percent)
             modified_context = self.insert_needle(context, _depth_percent, context_length)
-            question = f" Based on the content of the book, Question: {self.retrieval_question}\nAnswer:"
+            question = f"Based on the content of the book, Question: {self.retrieval_question}\nAnswer:"
             input_context = modified_context + question
+            # print(f"Input: *{[input_context]}*")
+            # print(f"Context: *{[modified_context]}*")
+            # print(f"Question: *{[question]}*")
             # input_ids = self.enc.tokenize(input_context, add_BOS=True)  # set to true
             generated_contexts.append(input_context)
             # generated_ids.append(input_ids)
@@ -494,9 +499,12 @@ class LLMNeedleHaystackTester:
     def encode_text_to_tokens(self, text):
         return self.enc.tokenize(text)
     def insert_needle(self, context, depth_percent, context_length):
+        # print(f"Context: {[context]}")
+        # print(f"Needle: {self.needle}")
         tokens_needle = self.encode_text_to_tokens(self.needle)
+        # print(f"Tokens_needle: {tokens_needle[:10]}")
         tokens_context = self.encode_text_to_tokens(context)
-
+        # print("Tokens_context:", tokens_context[:10])
         # Reducing the context length by 150 buffer. This is to account for system message, the user question, and response.
         context_length -= self.final_context_length_buffer
 
@@ -516,18 +524,7 @@ class LLMNeedleHaystackTester:
             tokens_new_context = tokens_context[:insertion_point]
 
             # We want to make sure that we place our needle at a sentence break so we first see what token a '.' is
-            period_token = get_token_memoization(self.enc, '.')
-            print("Period token:", period_token)
-            if period_token in [29889, 869]:
-                period_tokens = [29889, 869]
-            elif period_token in [88946, 13]:
-                period_tokens = [88946, 13]
-            elif period_token in [842, 28723]:
-                period_tokens = [842, 28723]
-            elif period_token in [918, 30930]:
-                period_tokens = [918, 30930]
-            else:
-                period_tokens = [period_token]
+            period_tokens = get_period_memoization(self.enc)
 
             # Then we iteration backwards until we find the first period
             while tokens_new_context and tokens_new_context[-1] not in period_tokens:
@@ -538,13 +535,13 @@ class LLMNeedleHaystackTester:
             # Once we get there, then add in your needle, and stick the rest of your context in on the other end.
             # Now we have a needle in a haystack
             tokens_new_context += tokens_needle + tokens_context[insertion_point:]
-
-        print("Context length after needle insertion:", len(tokens_new_context))
+            # print("Tokens_new_context:", tokens_new_context[:10])
+        # print("Context length after needle insertion:", len(tokens_new_context))
 
         # Convert back to a string and return it
         # print("")
-        new_context = self.decode_tokens(tokens_new_context)
-        print("New context:", new_context[:100])
+        new_context = self.decode_tokens(tokens_new_context, ignore_special_tokens=False)
+        # print("New context:", [new_context[:100]])
         return new_context
 
     def get_context_length_in_tokens(self, context):
@@ -554,9 +551,62 @@ class LLMNeedleHaystackTester:
     def read_context_files(self):
         context = ""
         max_context_length = max(self.context_lengths)
-
+        predefined_file_sequence_text="""Open file PaulGrahamEssays/sun.txt
+Open file PaulGrahamEssays/web20.txt
+Open file PaulGrahamEssays/avg.txt
+Open file PaulGrahamEssays/foundervisa.txt
+Open file PaulGrahamEssays/laundry.txt
+Open file PaulGrahamEssays/langdes.txt
+Open file PaulGrahamEssays/vcsqueeze.txt
+Open file PaulGrahamEssays/love.txt
+Open file PaulGrahamEssays/worked.txt
+Open file PaulGrahamEssays/gh.txt
+Open file PaulGrahamEssays/unions.txt
+Open file PaulGrahamEssays/addiction.txt
+Open file PaulGrahamEssays/want.txt
+Open file PaulGrahamEssays/hubs.txt
+Open file PaulGrahamEssays/apple.txt
+Open file PaulGrahamEssays/rss.txt
+Open file PaulGrahamEssays/startuplessons.txt
+Open file PaulGrahamEssays/newideas.txt
+Open file PaulGrahamEssays/boss.txt
+Open file PaulGrahamEssays/todo.txt
+Open file PaulGrahamEssays/before.txt
+Open file PaulGrahamEssays/goodtaste.txt
+Open file PaulGrahamEssays/siliconvalley.txt
+Open file PaulGrahamEssays/island.txt
+Open file PaulGrahamEssays/pow.txt
+Open file PaulGrahamEssays/rootsoflisp.txt
+Open file PaulGrahamEssays/popular.txt
+Open file PaulGrahamEssays/desres.txt
+Open file PaulGrahamEssays/superangels.txt
+Open file PaulGrahamEssays/weird.txt
+Open file PaulGrahamEssays/philosophy.txt
+Open file PaulGrahamEssays/bias.txt
+Open file PaulGrahamEssays/corpdev.txt
+Open file PaulGrahamEssays/mod.txt
+Open file PaulGrahamEssays/gap.txt
+Open file PaulGrahamEssays/vb.txt
+Open file PaulGrahamEssays/aord.txt
+Open file PaulGrahamEssays/useful.txt
+Open file PaulGrahamEssays/copy.txt
+Open file PaulGrahamEssays/ecw.txt
+Open file PaulGrahamEssays/founders.txt
+Open file PaulGrahamEssays/iflisp.txt
+Open file PaulGrahamEssays/vw.txt
+Open file PaulGrahamEssays/gba.txt
+Open file PaulGrahamEssays/submarine.txt
+Open file PaulGrahamEssays/wisdom.txt
+Open file PaulGrahamEssays/know.txt
+Open file PaulGrahamEssays/diff.txt
+Open file PaulGrahamEssays/nft.txt"""
+        predefined_file_sequence = []
+        for line in predefined_file_sequence_text.split("\n"):
+            predefined_file_sequence.append(line.split(" ")[-1])
         while self.get_context_length_in_tokens(context) < max_context_length:
-            for file in glob.glob(f"{self.haystack_dir}/*.txt"):
+            for file in predefined_file_sequence:
+            #for file in glob.glob(f"{self.haystack_dir}/*.txt"):
+                # print("Reading", file)
                 with open(file, 'r') as f:
                     context += f.read()
         return context
@@ -564,8 +614,8 @@ class LLMNeedleHaystackTester:
     def get_tokens_from_context(self, context):
         return self.encode_text_to_tokens(context)
 
-    def decode_tokens(self, tokens, context_length=None):
-        return self.enc.detokenize(tokens[:context_length])
+    def decode_tokens(self, tokens, context_length=None, **kwargs):
+        return self.enc.detokenize(tokens[:context_length], **kwargs)
 
     def encode_and_trim(self, context, context_length):
         # print("encode_and_trim")
@@ -573,7 +623,7 @@ class LLMNeedleHaystackTester:
         tokens = self.get_tokens_from_context(context)
         if len(tokens) > context_length:
             # print("decode_tokens")
-            context = self.decode_tokens(tokens, context_length)
+            context = self.decode_tokens(tokens, context_length, ignore_special_tokens=False)
         return context
 
     def get_results(self):
@@ -598,12 +648,29 @@ class LLMNeedleHaystackTester:
 
 
 token_dict = {}
-def get_token_memoization(enc, text):
-    if text in token_dict:
-        return token_dict[text]
-    # print("get token by calling")
-    token_dict[text] = enc.tokenize(text, ignore_special_tokens=True)[0]
-    return token_dict[text]
+def get_period_memoization(enc):
+    def memoize(enc):
+        if '.' in token_dict:
+            return token_dict['.']
+        print("get token by calling multiple cases")
+        sentence1 = enc.tokenize("Good.", ignore_special_tokens=True)
+        sentence2 = enc.tokenize("This is the last chance.", ignore_special_tokens=True)
+        sentence3 = enc.tokenize("The answer is 2.", ignore_special_tokens=True)
+
+        token_dict['.'] = list({sentence1[-1]} | {sentence2[-1]} | {sentence3[-1]})
+        return token_dict['.']
+
+    period_tokens = memoize(enc)
+    period_token = period_tokens[0]
+    if period_token in [29889, 869]:
+        period_tokens = [29889, 869]
+    elif period_token in [88946, 13]:
+        period_tokens = [88946, 13]
+    elif period_token in [842, 28723]:
+        period_tokens = [842, 28723]
+    elif period_token in [918, 30930]:
+        period_tokens = [918, 30930]
+    return period_tokens
 
 
 if __name__ == "__main__":
@@ -622,6 +689,8 @@ if __name__ == "__main__":
     parser.add_argument('--url', type=str, default="localhost:5000", help="service url")
     parser.add_argument("--batch_size", type=int, default=1, help="batch size")
     parser.add_argument("--window_size", type=str, default="None", help="window size")
+    parser.add_argument("--discard", action="store_true", help="discard the results")
+
     # parser = add_args(parser)
     args = parser.parse_args()
 
@@ -636,7 +705,7 @@ if __name__ == "__main__":
                                  model_name_suffix=args.model_name_suffix,
                                  model_provider=args.model_provider,
                                  save_contexts=True,
-                                 save_results=True,
+                                 save_results=not args.discard,
                                  mask_topk=args.mask_topk,
                                 context_lengths_min=args.s_len,
                                 context_lengths_max=args.e_len,

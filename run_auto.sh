@@ -1,0 +1,1 @@
+python model_management_system.py --experiment_yaml_file "$1" --megatron_path ~/wbbzy/Megatron-LM/ --retrieval_head_path ~/work/Retrieval_Head/

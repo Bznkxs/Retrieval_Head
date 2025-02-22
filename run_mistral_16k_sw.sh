@@ -1,0 +1,3 @@
+python needle_in_a_haystack_megatron.py --mask_top 0 --s 4096 --e 131072 --num_intervals 32 --model_provider Megatron --model_name mistral_7b_128k_16k_clip0_cyclic_fp16_predefined_input_post_sw_bugfix --window_size 4096 --url gh083:5000
+python needle_in_a_haystack_megatron.py --mask_top 0 --s 4096 --e 131072 --num_intervals 32 --model_provider Megatron --model_name mistral_7b_128k_16k_clip0_cyclic_fp16_predefined_input_post_sw_bugfix --window_size 16384 --url gh083:5000
+python needle_in_a_haystack_megatron.py --mask_top 0 --s 4096 --e 131072 --num_intervals 32 --model_provider Megatron --model_name mistral_7b_128k_16k_clip0_cyclic_fp16_predefined_input_post_sw_bugfix --window_size 32768 --url gh083:5000

@@ -93,7 +93,8 @@ class LLMNeedleHaystackTester:
                  save_contexts = True,
                  final_context_length_buffer = 200,
                  seconds_to_sleep_between_completions = None,
-                 print_ongoing_status = True):
+                 print_ongoing_status = True,
+                 basic=False):
         """
         :param needle: The needle to be found in the haystack. Default is None.
         :param haystack_dir: The directory of text files to use as background context (or a haystack) in which the needle is to be found. Default is Paul Graham Essays.
@@ -136,6 +137,7 @@ class LLMNeedleHaystackTester:
         self.testing_results = []
         self.head_counter = defaultdict(list)
         self.mask_topk = mask_topk
+        self.basic = basic
         if "CUDA_VISIBLE_DEVICES" in os.environ:
             self.multi_gpus = len(os.environ["CUDA_VISIBLE_DEVICES"])>1
         else:
@@ -186,7 +188,8 @@ class LLMNeedleHaystackTester:
                     )
             elif "Mistral" in self.model_version:
                 self.model_to_test = MistralForCausalLM.from_pretrained(
-                       model_name,torch_dtype="auto",device_map='auto',use_flash_attention_2="flash_attention_2",trust_remote_code=True,
+                       model_name,torch_dtype=torch.float16,device_map='auto',
+                    use_flash_attention_2="flash_attention_2",trust_remote_code=True,
                     )
             elif "Phi3" in self.model_version:
                 self.model_to_test = Phi3ForCausalLM.from_pretrained(
@@ -194,7 +197,7 @@ class LLMNeedleHaystackTester:
                     )
             else:
                 self.model_to_test = LlamaForCausalLM.from_pretrained(model_name,
-                    use_flash_attention_2="flash_attention_2", torch_dtype=torch.bfloat16,device_map='auto').eval()
+                    use_flash_attention_2="flash_attention_2", torch_dtype=torch.float16,device_map='auto').eval()
             # if 'llama-2-7b-80k' in self.model_version:
             #     scaling_factor = 10
             #     reset_rope(self.model_to_test, model_max_train_len=81920, scaling_factor=scaling_factor)
@@ -273,6 +276,10 @@ class LLMNeedleHaystackTester:
     def decode(self, q_outputs, inp, decode_len, block_list=None):
         output, retrieval_score = [], [[[0, ''] for _ in range(32)] for _ in range(32)]
         past_kv = q_outputs.past_key_values
+        if inp is None:
+            # use q_outputs to generate the first token
+            inp = q_outputs.logits[0, -1].argmax()
+            output.append(inp.item())
         for step_i in range(decode_len):
             inp = inp.view(1, 1)
             outputs = self.model_to_test(input_ids=inp, past_key_values=past_kv, use_cache=True, \
@@ -337,6 +344,9 @@ class LLMNeedleHaystackTester:
             input_ids = self.enc.apply_chat_template(conversation=prompt, tokenize=True,  add_generation_prompt=True, return_tensors='pt')
         else:
             input_context = context + question
+            print(f"Input: *{[input_context]}*")
+            print(f"Context: *{[context]}*")
+            print(f"Question: *{[question]}*")
             input_ids = self.enc(input_context , return_tensors="pt")['input_ids']
 
 
@@ -349,10 +359,16 @@ class LLMNeedleHaystackTester:
             input_ids = input_ids.to(self.model_to_test.device)
 
         self.needle_start, self.needle_end = self.find_needle_idx(self.real_needle)
+        basic = self.basic
         with torch.no_grad():
-            q_outputs = self.model_to_test(input_ids=input_ids[:,:-1], use_cache=True, return_dict=True)
-            output, retrieval_score  = self.decode(q_outputs, input_ids[:,-1], 50, block_list=block_list)
-            response = self.enc.decode(output,skip_special_tokens=True).strip()
+            if basic:
+                q_outputs = self.model_to_test(input_ids=input_ids, use_cache=True, return_dict=True)
+                output, retrieval_score = self.decode(q_outputs, None, 50, block_list=block_list)
+                response = self.enc.decode(output,skip_special_tokens=True).strip()
+            else:
+                q_outputs = self.model_to_test(input_ids=input_ids[:,:-1], use_cache=True, return_dict=True)
+                output, retrieval_score = self.decode(q_outputs, input_ids[:,-1], 50, block_list=block_list)
+                response = self.enc.decode(output,skip_special_tokens=True).strip()
 
         test_end_time = time.time()
         test_elapsed_time = test_end_time - test_start_time
@@ -441,9 +457,12 @@ class LLMNeedleHaystackTester:
             raise ValueError("model_provider must be either 'OpenAI' or 'Anthropic'")
 
     def insert_needle(self, context, depth_percent, context_length):
+        print(f"Context: {[context]}")
+        print(f"Needle: {self.needle}")
         tokens_needle = self.encode_text_to_tokens(self.needle)
+        print(f"Tokens_needle: {tokens_needle[:10]}")
         tokens_context = self.encode_text_to_tokens(context)
-
+        print("Tokens_context:", tokens_context[:10])
         # Reducing the context length by 150 buffer. This is to account for system message, the user question, and response.
         context_length -= self.final_context_length_buffer
 
@@ -480,9 +499,11 @@ class LLMNeedleHaystackTester:
             # Once we get there, then add in your needle, and stick the rest of your context in on the other end.
             # Now we have a needle in a haystack
             tokens_new_context += tokens_needle + tokens_context[insertion_point:]
+            print("Tokens_new_context:", tokens_new_context[:10])
 
         # Convert back to a string and return it
         new_context = self.decode_tokens(tokens_new_context)
+        print("New context: ", [new_context[:100]])
         return new_context
 
     def get_context_length_in_tokens(self, context):
@@ -561,7 +582,9 @@ if __name__ == "__main__":
     parser.add_argument('--api_key', type=str, default="", help='OpenAI API Key')
     parser.add_argument('--mask_topk', type=int, default=0, help='mask topk heads, input a negative value to mask random heads')
     parser.add_argument('--num_intervals', type=int, default=40, help='number of intervals of the test')
+    parser.add_argument("--discard", action="store_true", help="discard the results")
     # parser = add_args(parser)
+    parser.add_argument("--basic", action="store_true", help="use basic decoding")
     args = parser.parse_args()
 
     if(args.model_path is not None):
@@ -574,11 +597,12 @@ if __name__ == "__main__":
                                  model_name_suffix=args.model_name_suffix,
                                  model_provider=args.model_provider,
                                  save_contexts=True,
-                                 save_results=True,
+                                 save_results=not args.discard,
                                  mask_topk=args.mask_topk,
                                 context_lengths_min=args.s_len,
                                 context_lengths_max=args.e_len,
-                                context_lengths_num_intervals=args.num_intervals
+                                context_lengths_num_intervals=args.num_intervals,
+                                 basic=args.basic
                                  )
 
     ht.start_test(args)

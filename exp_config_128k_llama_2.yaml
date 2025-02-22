@@ -1,0 +1,16 @@
+global_args:
+  exist_on_existence: true
+  exp_name_suffix: 128k_llama
+  rope_theta: 5000000
+  batch_size: 4m
+  auto_range: true
+  full_test: true
+  save_base_path: /u/yufengd4/work/models
+  model_type: llama
+  skip_error: true  # to skip OOM errors
+list:
+  - model_path:  /work/nvme/bbvf/mtian8/LLM/data/checkpoint_long_128k_-1_5000000_clip1.0_cyclic_warmup
+    training_step: 500
+
+
+

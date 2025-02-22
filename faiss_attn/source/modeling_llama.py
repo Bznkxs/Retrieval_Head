@@ -19,6 +19,7 @@
 # limitations under the License.
 """ PyTorch LLaMA model."""
 import math
+import os
 import warnings
 from typing import List, Optional, Tuple, Union, Any
 
@@ -92,6 +93,16 @@ logger = logging.get_logger(__name__)
 _CONFIG_FOR_DOC = "LlamaConfig"
 
 
+debug_used=True
+def debug(*args, **kwargs):
+    if debug_used:
+        print(*args, **kwargs)
+
+def change_debug(to):
+    global debug_used
+    debug_used = to
+    return debug_used
+
 def _get_unpad_data(attention_mask):
     seqlens_in_batch = attention_mask.sum(dim=-1, dtype=torch.int32)
     indices = torch.nonzero(attention_mask.flatten(), as_tuple=False).flatten()
@@ -129,13 +140,34 @@ class LlamaRMSNorm(nn.Module):
         """
         super().__init__()
         self.weight = nn.Parameter(torch.ones(hidden_size))
+        print("Weight:", self.weight.shape, self.weight.data, self.weight.data.sum())
         self.variance_epsilon = eps
 
     def forward(self, hidden_states):
         input_dtype = hidden_states.dtype
         hidden_states = hidden_states.to(torch.float32)
-        variance = hidden_states.pow(2).mean(-1, keepdim=True)
-        hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
+        # print("INPUT:", hidden_states.sum())
+        # print("WEIGHT:", self.weight.shape, self.weight.data, self.weight.data.sum())
+        # json save hidden states
+        if not os.path.exists("/u/yufengd4/te_layer_norm_input.txt"):
+            with open("/u/yufengd4/te_layer_norm_input.txt", "w") as f:
+                import json
+                f.write(json.dumps(hidden_states.cpu().float().numpy().tolist()))
+        # json save weight
+        if not os.path.exists("/u/yufengd4/faiss_attn_ln_weights.json"):
+            import json
+            with open("/u/yufengd4/faiss_attn_ln_weights.json", "w") as f:
+                f.write(json.dumps(self.weight.data.cpu().float().numpy().tolist()))
+        # print("Input:", hidden_states.shape, hidden_states, hidden_states.sum())
+        variance = hidden_states.float().pow(2).mean(-1, keepdim=True)
+        # print("Var:", variance.shape, variance, variance.sum())
+        # print("EPSILON:", self.variance_epsilon)
+        hidden_states = hidden_states.float() * torch.rsqrt(variance + self.variance_epsilon)
+        # print("OUTPUT:", (self.weight.float() * hidden_states.float()).sum())
+        if not os.path.exists("/u/yufengd4/faiss_ln_output_fp16.txt"):
+            with open("/u/yufengd4/faiss_ln_output_fp16.txt", "w") as f:
+                import json
+                f.write(json.dumps((self.weight * hidden_states.to(input_dtype)).cpu().float().numpy().tolist()))
         return self.weight * hidden_states.to(input_dtype)
 
 
@@ -530,6 +562,11 @@ class LlamaFlashAttention2(LlamaAttention):
         query_states = self.q_proj(hidden_states)
         key_states = self.k_proj(hidden_states)
         value_states = self.v_proj(hidden_states)
+        debug("q proj weights:", self.q_proj.weight.shape, self.q_proj.weight.data)
+        debug("k proj weights:", self.k_proj.weight.shape, self.k_proj.weight.data)
+        debug("v proj weights:", self.v_proj.weight.shape, self.v_proj.weight.data)
+        # if file does not exist
+
 
         # Flash attention requires the input to have the shape
         # batch_size x seq_length x head_dim x hidden_dim
@@ -537,7 +574,20 @@ class LlamaFlashAttention2(LlamaAttention):
         query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
         key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
         value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-
+        if not os.path.exists("/u/yufengd4/faiss_qkv_output_fp16.txt"):
+            with open("/u/yufengd4/faiss_qkv_output_fp16.txt", "w") as f:
+                import json
+                json.dump(
+                    [
+                        query_states.cpu().float().numpy().tolist(),
+                        key_states.cpu().float().numpy().tolist(),
+                        value_states.cpu().float().numpy().tolist()
+                    ], f
+                )
+                print("Saved")
+        debug("Query: ", query_states[..., :6])
+        debug("Key:   ", key_states[..., :6])
+        debug("value: ", value_states[..., :6])
         kv_seq_len = key_states.shape[-2]
         if past_key_value is not None:
             kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
@@ -561,6 +611,11 @@ class LlamaFlashAttention2(LlamaAttention):
         key_states = key_states.transpose(1, 2)
         value_states = value_states.transpose(1, 2)
 
+
+        debug("Cos: ", cos[..., :6])
+        debug("Sin: ", sin[..., :6])
+        debug("Post rope query: ", query_states[..., :6])
+        debug("Post rope key:   ", key_states[..., :6])
         dropout_rate = self.attention_dropout if self.training else 0.0
 
         # In PEFT, usually we cast the layer norms in float32 for training stability reasons
@@ -592,7 +647,9 @@ class LlamaFlashAttention2(LlamaAttention):
         )
 
         attn_output = attn_output.reshape(bsz, q_len, self.hidden_size).contiguous()
+        debug("Core attention out", attn_output[..., :6])
         attn_output = self.o_proj(attn_output)
+        debug("Linear proj Output:", attn_output[..., :6])
 
         return attn_output, inspect, attn_weights, past_key_value
      
@@ -639,6 +696,8 @@ class LlamaFlashAttention2(LlamaAttention):
         query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
         key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
         value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+
+
 
         kv_seq_len = key_states.shape[-2]
         # print(past_key_value)
@@ -909,6 +968,9 @@ class LlamaDecoderLayer(nn.Module):
 
         self.mlp = LlamaMLP(config)
         self.input_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        print("Before from pretrained: layer norm", self.input_layernorm.weight,
+              self.input_layernorm.weight.sum(),
+              self.input_layernorm.weight.shape)
         self.post_attention_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(
@@ -944,6 +1006,14 @@ class LlamaDecoderLayer(nn.Module):
         residual = hidden_states
 
         hidden_states = self.input_layernorm(hidden_states)
+        debug("Layer norm hidden states:", hidden_states)
+        if not os.path.exists("/u/yufengd4/f_llama_input_layer_norm.txt"):
+            import json
+            with open("/u/yufengd4/f_llama_input_layer_norm.txt", "w") as f:
+                json.dump(
+                    hidden_states.cpu().float().numpy().tolist(), f
+                )
+                print("Saved")
 
         # Self Attention
         #print("#2", kwargs)
@@ -969,13 +1039,17 @@ class LlamaDecoderLayer(nn.Module):
                     use_cache=use_cache,
                     **kwargs,
                 )
+
         else: raise ValueError("attention mode %s invalid" % attn_mode)
+        debug("After self attention:", hidden_states[..., :6])
         hidden_states = residual + hidden_states
 
         # Fully Connected
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
+        debug("After post attention layer norm:", hidden_states[..., :6])
         hidden_states = self.mlp(hidden_states)
+        debug("After MLP:", hidden_states[..., :6])
         hidden_states = residual + hidden_states
 
         outputs = (hidden_states,)
@@ -1103,6 +1177,7 @@ LLAMA_INPUTS_DOCSTRING = r"""
 """
 
 
+
 @add_start_docstrings(
     "The bare LLaMA Model outputting raw hidden-states without any specific head on top.",
     LLAMA_START_DOCSTRING,
@@ -1211,7 +1286,7 @@ class LlamaModel(LlamaPreTrainedModel):
 
         # embed positions
         hidden_states = inputs_embeds
-
+        debug("Transformer input hidden states: ", hidden_states[..., :8])
         if self.gradient_checkpointing and self.training:
             if use_cache:
                 logger.warning_once(
@@ -1228,8 +1303,9 @@ class LlamaModel(LlamaPreTrainedModel):
             kwargs={"block_list":block_list}
         else:
             kwargs={}
-        
-        for decoder_layer in self.layers:
+        w = debug_used
+        for l_no, decoder_layer in enumerate(self.layers):
+            # print(f"L. {l_no}: Input hidden_states: {hidden_states[..., :8]}")
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
 
@@ -1256,6 +1332,11 @@ class LlamaModel(LlamaPreTrainedModel):
                 )
 
             hidden_states = layer_outputs[0]
+            if l_no == 0:
+                debug(f"L. {l_no}:Output hidden_states: {hidden_states[..., :8]}")
+                change_debug(False)
+
+
 
             if use_cache:
                 next_decoder_cache = layer_outputs[3 if output_attentions else 1]
@@ -1265,7 +1346,9 @@ class LlamaModel(LlamaPreTrainedModel):
                 all_inspect += (layer_outputs[2],)
 
         hidden_states = self.norm(hidden_states)
-
+        change_debug(w)
+        debug(f"Norm hidden_states: {hidden_states[..., :8]}")
+        change_debug(False)
         # add hidden states from the last decoder layer
         if output_hidden_states:
             all_hidden_states += (hidden_states,)
@@ -1291,6 +1374,8 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
     def __init__(self, config):
         super().__init__(config)
         self.model = LlamaModel(config)
+
+
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
 
@@ -1363,7 +1448,9 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-
+        print("Tokens:", len(input_ids[0]))
+        print("First 5:", input_ids[0, :5])
+        print("Last 5:", input_ids[0, -5:])
         # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
         outputs = self.model(
             input_ids=input_ids,
@@ -1387,6 +1474,8 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
         else:
             logits = self.lm_head(hidden_states)
         logits = logits.float()
+        print("Logits:", logits[..., -1, :10])
+        # input()
 
         loss = None
         if labels is not None:
@@ -1478,6 +1567,8 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
                 tuple(past_state.index_select(0, beam_idx.to(past_state.device)) for past_state in layer_past),
             )
         return reordered_past
+
+
 
 
 @add_start_docstrings(
