@@ -149,7 +149,7 @@ def megatron_client_generate(url, prompt_list, tokens_to_generate, window_size=N
             "ignore_special_tokens": True, "add_BOS": False, "random_seed": 0, "top_k": 1,
             "window_size": window_size, "stop_on_eol": True, "prevent_newline_after_colon": True}  # for future implementation
     if needle_positions:
-        data["attend_positions"] = needle_positions
+        data["oracle_positions"] = needle_positions
     response = requests.put(url, data=json.dumps(data), headers=headers)
 
     if response.status_code != 200:
