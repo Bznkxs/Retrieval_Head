@@ -236,14 +236,6 @@ def get_url(base_url, request_type):
     else:
         raise ValueError("Invalid request type. Must be 'generate', 'tokenize', or 'detokenize', or 'modify_window_size'.")
 
-def reset_rope(model, model_max_train_len, scaling_factor):
-    for l in model.model.layers:
-        l.self_attn.rotary_emb.scaling_factor = scaling_factor
-        l.self_attn.rotary_emb._set_cos_sin_cache(seq_len=model_max_train_len,
-                                                  device=l.self_attn.rotary_emb.inv_freq.device, dtype=torch.float32)
-    return
-
-
 
 class LLMNeedleHaystackTester:
     """
@@ -328,7 +320,7 @@ class LLMNeedleHaystackTester:
         answers = []
         few_shots = None
 
-        for problem, few_shot_problems in self.problem_generator.__iter__(10, self.num_few_shots):
+        for problem, few_shot_problems in self.problem_generator.__iter__(self.num_problems, self.num_few_shots):
             if few_shots is None:
                 few_shots = ''.join([' '.join(_problem.format_problem(True)) + '\n' for _problem in few_shot_problems])
                 few_shots = LazyTokenizedObject(few_shots)
@@ -554,40 +546,18 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--s', '--s_len', metavar='N', type=int, help='a number')
     parser.add_argument('--e', '--e_len', metavar='N', type=int, help='a number')
-    parser.add_argument('--model_path', type=str, default=None, help='path to model')
     parser.add_argument('--model_name', type=str, default=None, help='name of model')
     parser.add_argument('--model_name_suffix', type=str, default='', help='name of model')
-    parser.add_argument('--model_provider', type=str, default="Megatron", help='which model to use')
-    parser.add_argument('--api_key', type=str, default="", help='OpenAI API Key')
-    parser.add_argument('--mask_topk', type=int, default=0, help='mask topk heads, input a negative value to mask random heads')
     parser.add_argument('--num_intervals', type=int, default=40, help='number of intervals of the test')
-    parser.add_argument('--device', type=str, default="auto", help="device")
     parser.add_argument('--url', type=str, default="localhost:5000", help="service url")
-    parser.add_argument("--batch_size", type=int, default=1, help="batch size")
-    parser.add_argument("--window_size", type=str, default="None", help="window size")
     parser.add_argument("--discard", action="store_true", help="discard the results")
-    parser.add_argument("--cot_level", type=int, default=2, help="cot level")
-    parser.add_argument("--setting", type=str, default="local", help="setting")
-    parser.add_argument("--selection", type=str, default="fixed", help="selection")
-    parser.add_argument("--document_depth_percent_interval_type", type=str, default="linear",
-                        help="interval type")  # sigmoid; last-4096
-    parser.add_argument("--show_few_shot_answer", action="store_true", help="show few shot answer")
     parser.add_argument("--skip_existing", action="store_true", help="skip existing")
-    parser.add_argument("--send_needle_positions", action="store_true", help="send needle positions")
-    parser.add_argument("--split_cot", action="store_true", help="show few shot answer")
-    parser.add_argument("--default_needle", type=int, default=0, help="The serial number of the default needle.")
-    parser.add_argument("--document_depth_percent_intervals", type=int, default=10, help="number of tested depths")
     parser.add_argument("--num_problems", type=int, default=10, help="number of problems")
 
     # parser = add_args(parser)
     args = parser.parse_args()
 
-    if (args.model_path is not None):
-        assert (args.model_name is None)
-        model_name = args.model_path
-    else:
-        assert (args.model_name is not None)
-        model_name = args.model_name
+    model_name = args.model_name
 
     if not hasattr(args, 's_len'):
         args.s_len = args.s
