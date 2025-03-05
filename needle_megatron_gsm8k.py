@@ -136,7 +136,8 @@ questions_raw = [
 #     cot = q["answer"].split("####")[0].split("**")
 
 def megatron_client_generate(url, prompt_list, tokens_to_generate, window_size=None,
-                             needle_positions=None):
+                             needle_positions=None, oracle_mode="off", distance_between_positions=0,
+                             attention_save_file=""):
     """
     masked_tokens: None or list[list[bool]]. Masked tokens for each example. True means not masked. False means masked.
     """
@@ -147,7 +148,9 @@ def megatron_client_generate(url, prompt_list, tokens_to_generate, window_size=N
     data = {"prompts": prompt_list, "tokens_to_generate": tokens_to_generate,
 
             "ignore_special_tokens": True, "add_BOS": False, "random_seed": 0, "top_k": 1,
-            "window_size": window_size, "stop_on_eol": True, "prevent_newline_after_colon": True}  # for future implementation
+            "window_size": window_size, "stop_on_eol": True, "prevent_newline_after_colon": True,
+            "oracle_mode": oracle_mode, "distance_between_positions": distance_between_positions,
+            "attention_save_file": attention_save_file}  # for future implementation
     if needle_positions:
         data["oracle_positions"] = needle_positions
     response = requests.put(url, data=json.dumps(data), headers=headers)
@@ -375,6 +378,9 @@ class LLMNeedleHaystackTester:
                  show_few_shot_answer=False,
                  split_cot=False,
                  send_needle_positions=False,
+                 oracle_mode="off",
+                 space_mode=False,
+                 attention_save_file=""
                  ):
         """
         :param needle: The needle to be found in the haystack. Default is None.
@@ -424,6 +430,10 @@ class LLMNeedleHaystackTester:
         self.mask_topk = mask_topk
         self.service_url = service_url
         self.batch_size = batch_size
+        self.oracle_mode = oracle_mode
+        self.internal_space_mode = False
+        self.space_mode = (not self.internal_space_mode) and space_mode
+        self.attention_save_file = attention_save_file
         if window_size == "None":
             self.window_size = None
         else:
@@ -465,6 +475,7 @@ class LLMNeedleHaystackTester:
         self.model_version = "GSM8k_" + self.model_version
         if document_depth_percent_interval_type not in [None, "linear", "sigmoid"]:
             self.model_version += f"_{document_depth_percent_interval_type}"
+        self.model_version += f"_oracle_{oracle_mode}"
         if context_lengths is None:
             if context_lengths_min is None or context_lengths_max is None or context_lengths_num_intervals is None:
                 raise ValueError(
@@ -517,10 +528,12 @@ class LLMNeedleHaystackTester:
 
         self.model_version += "_" + self.model_provider
 
-        def model_wrapping_for_batch_pretender(prompt_list, tokens_to_generate, needle_positions=None):
+        def model_wrapping_for_batch_pretender(prompt_list, tokens_to_generate, needle_positions=None, attention_save_file=""):
             if prompt_list is not None and len(getattr(self, "_model_output_buffer", [])) == 0:
                 generation = megatron_client_generate(get_url(self.service_url, "generate"), prompt_list, tokens_to_generate,
-                                                      window_size=self.window_size, needle_positions=needle_positions if send_needle_positions else None)  # for future
+                                                      window_size=self.window_size, needle_positions=needle_positions if send_needle_positions else None,
+                                                      oracle_mode=oracle_mode, distance_between_positions=1437 if self.internal_space_mode else 1,
+                                                      attention_save_file=attention_save_file)  # for future
                 self._model_output_buffer = generation
             first_sample, self._model_output_buffer = self._model_output_buffer[0], self._model_output_buffer[1:]
             return first_sample
@@ -615,6 +628,7 @@ class LLMNeedleHaystackTester:
         return results
 
     def evaluate_and_log(self, context_length, depth_percent):
+
         # Checks to see if you've already checked a length/percent/version.
         # This helps if the program stop running and you want to restart later
         # Go generate the required length context and place your needle statement in
@@ -628,21 +642,25 @@ class LLMNeedleHaystackTester:
             block_list = self.construct_random_head(-self.mask_topk)
             save_name = f"{self.model_version}_block_random{-self.mask_topk}"
         context, input_ids, needle_positions = self.generate_input_ids_pretender(context_length, depth_percent)
+        context_str = [c[1] for c in context]
+        context_token = [c[0] for c in context]
         # context = self.generate_context(context_length, depth_percent)
         # question = f"Based on the content of the book, Question: {self.retrieval_question}\nAnswer:"
-        input_context = context
+        input_context = context_token
+        # if abs(depth_percent - 0) < 1e-5:
+        #     return
         # input_ids = context
-
         test_start_time = time.time()
 
         # self.real_needle = "eat a sandwich and sit in Dolores Park on a sunny day"
         self.prompt_ids = input_ids
 
-        output = self.model_to_test(prompt_list=input_context, tokens_to_generate=70, needle_positions=needle_positions)
+        output = self.model_to_test(prompt_list=[input_ids.replace("<s>", "")], tokens_to_generate=80, needle_positions=needle_positions,
+                                    attention_save_file=self.attention_save_file + "_" + str(context_length) + "_" + str(depth_percent))
         # print("Response:", output)
-        question = f"Based on the content of the book, Question: {self.retrieval_question}\nAnswer: "
+        question = f"Based on the content of the book"
         # question += "The answer is"
-        response = output.split(question)[1].strip()
+        response = output.split(question)[1].split("Answer:")[1].strip()
 
         test_end_time = time.time()
         test_elapsed_time = test_end_time - test_start_time
@@ -774,15 +792,16 @@ class LLMNeedleHaystackTester:
             # print("Generate", _depth_percent)
             question = f"\nBased on the content of the book, Question: {self.retrieval_question}\nAnswer: "
             # question += "The answer is "
-            modified_context, needle_position = self.insert_needle(context, _depth_percent, context_length, question)
+            modified_context_tokens, context_string, needle_position = self.insert_needle(context, _depth_percent, context_length, question)
 
-            input_context = modified_context + examples + question
+            # input_context = context_string + examples + question
+
             needle_positions.append(needle_position)
             # print(f"Input: *{[input_context]}*")
             # print(f"Context: *{[modified_context]}*")
             # print(f"Question: *{[question]}*")
             # input_ids = self.enc.tokenize(input_context, add_BOS=True)  # set to true
-            generated_contexts.append(input_context)
+            generated_contexts.append((modified_context_tokens, context_string))
             # generated_ids.append(input_ids)
             # print("Generated contexts:", len(generated_contexts))
             if len(generated_contexts) == max_length:
@@ -806,11 +825,11 @@ class LLMNeedleHaystackTester:
         if i == 0:  # if this is the first depth, generate all depth percents
             self.batch_input, self.needle_positions = self._batch_generate_input_ids(context_length)
         if i % self.batch_size == 0:  # return a batch of input ids
-            return self.batch_input[i: i + self.batch_size], self.batch_input[i], self.needle_positions[i: i + self.batch_size]
-        return None, self.batch_input[i], None
+            return self.batch_input[i: i + self.batch_size], self.batch_input[i][1], self.needle_positions[i: i + self.batch_size]
+        return None, self.batch_input[i][1], None
 
-    def encode_text_to_tokens(self, text):
-        return self.enc.tokenize(text)
+    def encode_text_to_tokens(self, text, add_BOS=False, ignore_special_tokens=True, **kwargs):
+        return self.enc.tokenize(text, add_BOS=add_BOS, ignore_special_tokens=ignore_special_tokens, **kwargs)
 
     def insert_needle(self, context, depth_percent, context_length, question=None):
 
@@ -822,21 +841,21 @@ class LLMNeedleHaystackTester:
         tokens_distractors = [self.encode_text_to_tokens(d.needle) for d in self.distractors]
         # print("Distractors:", [d.needle for d in self.distractors])
         # print(f"Tokens_needle: {tokens_needle[:10]}")
-        tokens_context = self.encode_text_to_tokens(context)
-        # print("Tokens_context:", tokens_context[:10])
+        tokens_context_with_bos = self.encode_text_to_tokens(context, ignore_special_tokens=False)
+        # print("Tokens_context:", tokens_context_with_bos[:10])
         # Reducing the context length by 150 buffer. This is to account for system message, the user question, and response.
         context_length -= self.final_context_length_buffer
         if question:
-            tokens_question = self.encode_text_to_tokens(question)
+            _tokens_question = self.encode_text_to_tokens(question)
         else:
-            tokens_question = []
+            _tokens_question = []
         examples, tokens_examples = self.get_examples()
-        tokens_question = tokens_examples + tokens_question
+        tokens_examples_question = tokens_examples + _tokens_question
         # print("Len of example + question:", len(tokens_question))
 
         # If your context + needle are longer than the context length (which it will be), then reduce tokens from the context by the needle length
 
-        max_length = context_length - len(tokens_needle) - len(tokens_question)
+        max_length = context_length - len(tokens_needle) - len(tokens_examples_question)
         if self.split_cot:
             tokens_cot = self.encode_text_to_tokens(self.cot)
             max_length -= len(tokens_cot)
@@ -845,12 +864,16 @@ class LLMNeedleHaystackTester:
             max_length -= len(tokens_distractors[i])
 
         max_length = max(max_length, 0)
-        tokens_context = tokens_context[:max_length]
+        tokens_context_with_bos = tokens_context_with_bos[:max_length]
+
+        def change_tokens_context_to_space(tokens_context, skip_special_tokens=True):
+            space_token = memoize_space(self.enc)[0]
+            return [space_token if t >= 3 or not skip_special_tokens else t for t in tokens_context]
 
         def insert_needle_inner(tokens_context, depth_percent, tokens_needle, lower_bound=0, print_info=""):
 
             if self.document_depth_last_tokens is not None:
-                insertion_point = (len(tokens_context) + len(tokens_needle) + len(tokens_question)
+                insertion_point = (len(tokens_context) + len(tokens_needle) + len(tokens_examples_question)
                                    - self.document_depth_last_tokens + int(depth_percent))
                 if insertion_point > len(tokens_context):  # redundant
                     insertion_point = len(tokens_context)
@@ -858,9 +881,11 @@ class LLMNeedleHaystackTester:
                 insertion_point = int(len(tokens_context) * (depth_percent / 100) + 0.5)
             if insertion_point < lower_bound:
                 insertion_point = lower_bound
-            if insertion_point <= 0:
-                insertion_point = 0
-                tokens_new_context = tokens_needle + tokens_context
+            if insertion_point <= 1:  # BOS
+                insertion_point = 1
+                if self.space_mode:
+                    tokens_context = change_tokens_context_to_space(tokens_context)
+                tokens_new_context = tokens_context[:1] + tokens_needle + tokens_context[1:]
             else:
                 # Go get the position (in terms of tokens) to insert your needle
 
@@ -886,6 +911,10 @@ class LLMNeedleHaystackTester:
                     insertion_point += 1
                 # print(print_info, "Insertion at", insertion_point)
 
+                if self.space_mode:
+                    tokens_new_context = change_tokens_context_to_space(tokens_new_context)
+                    tokens_context = change_tokens_context_to_space(tokens_context)
+
                 # Once we get there, then add in your needle, and stick the rest of your context in on the other end.
                 # Now we have a needle in a haystack
                 tokens_new_context += tokens_needle + tokens_context[insertion_point:]
@@ -893,7 +922,7 @@ class LLMNeedleHaystackTester:
             # print("Context length after needle insertion:", len(tokens_new_context))
             return tokens_new_context, insertion_point
 
-        tokens_new_context = tokens_context
+        tokens_new_context = tokens_context_with_bos
         needle_position = []
 
         # insert distractors
@@ -912,7 +941,7 @@ class LLMNeedleHaystackTester:
         tokens_new_context, insertion_point = insert_needle_inner(tokens_new_context, depth_percent, tokens_needle, print_info="[needle]")
         needle_position.append([insertion_point, insertion_point + len(tokens_needle)])
         print("Inserting needle at", insertion_point, "with total length", len(tokens_new_context), "and needle length",
-              len(tokens_needle), "and question length", len(tokens_question))
+              len(tokens_needle), "and question length", len(tokens_examples_question))
 
         if self.split_cot:
             block_size = self.window_size
@@ -937,17 +966,18 @@ class LLMNeedleHaystackTester:
             tokens_new_context, insertion_point_2 = insert_needle_inner(tokens_new_context, target_depth_percent, tokens_cot, lower_bound=insertion_point + len(tokens_needle), print_info="[cot]")
             needle_position.append([insertion_point_2, insertion_point_2 + len(tokens_cot)])
             print("Inserting cot at", insertion_point_2, "with total length", len(tokens_new_context), "and cot length",
-                  len(tokens_cot), "and question length", len(tokens_question))
+                  len(tokens_cot), "and question length", len(tokens_examples_question))
 
         # Convert back to a string and return it
         # print("")
-        new_context = self.decode_tokens(tokens_new_context, ignore_special_tokens=False)
-        # print("New context:", [new_context[:100]])
-        return new_context, needle_position
+        tokens_new_context += tokens_examples_question
+        new_context_display = self.decode_tokens(tokens_new_context, ignore_special_tokens=False)
+        print("New context:", [new_context_display[:100]], tokens_new_context[:20])
+        return tokens_new_context, new_context_display, needle_position
 
     def get_context_length_in_tokens(self, context):
         # print("Getting context length in tokens")
-        return len(self.encode_text_to_tokens(context))
+        return len(self.encode_text_to_tokens(context, ignore_special_tokens=False))
 
     def read_context_files(self):
         context = ""
@@ -1050,19 +1080,32 @@ Open file PaulGrahamEssays/nft.txt"""
 
 
 token_dict = {}
-def get_period_memoization(enc):
-    def memoize(enc):
-        if '.' in token_dict:
-            return token_dict['.']
-        print("get token by calling multiple cases")
-        sentence1 = enc.tokenize("Good.", ignore_special_tokens=True)
-        sentence2 = enc.tokenize("This is the last chance.", ignore_special_tokens=True)
-        sentence3 = enc.tokenize("The answer is 2.", ignore_special_tokens=True)
 
-        token_dict['.'] = list({sentence1[-1]} | {sentence2[-1]} | {sentence3[-1]})
+
+def memoize_period(enc):
+    if '.' in token_dict:
         return token_dict['.']
+    print("get token by calling multiple cases")
+    sentence1 = enc.tokenize("Good.", ignore_special_tokens=True)
+    sentence2 = enc.tokenize("This is the last chance.", ignore_special_tokens=True)
+    sentence3 = enc.tokenize("The answer is 2.", ignore_special_tokens=True)
 
-    period_tokens = memoize(enc)
+    token_dict['.'] = list({sentence1[-1]} | {sentence2[-1]} | {sentence3[-1]})
+    return token_dict['.']
+
+def memoize_space(enc):
+    if ' ' in token_dict:
+        return token_dict[' ']
+    token_dict[' '] = enc.tokenize(".", ignore_special_tokens=True)
+    print("Space token:", token_dict[' '])
+    print("Space token:", f"[{enc.detokenize(token_dict[' '] + token_dict[' '])}]")
+    print("----", enc.tokenize(enc.detokenize(token_dict[' '] + token_dict[' ']), ignore_special_tokens=True))
+    return token_dict[' ']
+
+def get_period_memoization(enc):
+
+
+    period_tokens = memoize_period(enc)
     period_token = period_tokens[0]
     if period_token in [29889, 869]:
         period_tokens = [29889, 869]
@@ -1101,8 +1144,10 @@ if __name__ == "__main__":
     parser.add_argument("--send_needle_positions", action="store_true", help="send needle positions")
     parser.add_argument("--split_cot", action="store_true", help="show few shot answer")
     parser.add_argument("--default_needle", type=int, default=0, help="The serial number of the default needle.")
+    parser.add_argument("--oracle_mode", type=str, default="off", help=".")
     parser.add_argument("--document_depth_percent_intervals", type=int, default=10, help="number of tested depths")
-
+    parser.add_argument("--space_mode", action="store_true", help="")
+    parser.add_argument("--attention_save_file", type=str, default="", help="")
     # parser = add_args(parser)
     args = parser.parse_args()
 
@@ -1140,6 +1185,9 @@ if __name__ == "__main__":
                                  show_few_shot_answer=args.show_few_shot_answer,
                                  split_cot=args.split_cot,
                                  send_needle_positions=args.send_needle_positions,
+                                 oracle_mode=args.oracle_mode,
+                                 space_mode=args.space_mode,
+                                 attention_save_file=args.attention_save_file
       )
 
     ht.start_test(args)
