@@ -238,12 +238,13 @@ class GSM8kNeedle:
         self.target = questions[_idx]
         self.needle = self.target["description"]
         self.cot = ""
+        self.cot_2 = " ".join(self.target["cot"][1:-1:2])
         if show_few_shot_answer:
             cot_level = 3
         if cot_level:
-            self.cot += " Let's think step by step: "
+            # self.cot += " Let's think step by step: "
             if cot_level == 1:
-                self.cot += " ".join(self.target["cot"][:-2])
+                self.cot += " ".join(self.target["cot"][:-1])
             elif cot_level == 2:
                 self.cot += " ".join(self.target["cot"][1:-1:2])
             elif cot_level == 3:
@@ -253,7 +254,7 @@ class GSM8kNeedle:
             elif cot_level == 5:
                 self.cot += " ".join(self.target["cot"][:-1]) + " " + self.target["cot"][-1].split("=")[0] + "..."
         if show_few_shot_answer:
-            self.cot += " Question: " + self.target["question_only"] + " Answer: " + self.target["answer_only"] + " # "
+            self.cot += "\n Question: " + self.target["question_only"] + " Answer: Let's first repeat the problem description and reasoning." + self.needle + ". " + self.cot + ". Finally, the answer is " + self.target["answer_only"] + ".\n"
         # self.needle += self.cot
         self.question = self.target["question_only"]
         self.answer = self.target["answer_only"]
@@ -266,6 +267,7 @@ class GSM8kNeedleGenerator:
         - retrieval: The question, cot and distractors are inserted
         - local: The question and cot are inserted in a close context
         """
+        print("Show few shot answer", show_few_shot_answer)
         self.questions = questions_raw
         setting_parts = setting.split('-', maxsplit=2)
         self.setting = setting_parts[0]
@@ -655,12 +657,18 @@ class LLMNeedleHaystackTester:
         # self.real_needle = "eat a sandwich and sit in Dolores Park on a sunny day"
         self.prompt_ids = input_ids
 
-        output = self.model_to_test(prompt_list=[input_ids.replace("<s>", "")], tokens_to_generate=80, needle_positions=needle_positions,
+        output = self.model_to_test(prompt_list=input_context, tokens_to_generate=200, needle_positions=needle_positions,
                                     attention_save_file=self.attention_save_file + "_" + str(context_length) + "_" + str(depth_percent))
         # print("Response:", output)
         question = f"Based on the content of the book"
         # question += "The answer is"
-        response = output.split(question)[1].split("Answer:")[1].strip()
+        response = output.split(question)[1].split("Let's first repeat the problem description and reasoning.")[1].strip()
+        self.needle2 = self.needle_generator.pool["needle"].needle + self.needle_generator.pool["needle"].cot_2
+        response = ''.join(re.split(r'<<.*?>>', response))
+        self.needle2 = ''.join(re.split(r'<<.*?>>', self.needle2))
+        rouge_score = scorer.score(self.needle2, response)['rouge1'].recall*100
+
+
 
         test_end_time = time.time()
         test_elapsed_time = test_end_time - test_start_time
@@ -681,7 +689,11 @@ class LLMNeedleHaystackTester:
         if response.find(str(self.real_needle)) != -1:
             score = 100
         else:
-            score = 0
+            if response.find("166") != -1 or response.find("173") != -1:
+                score = 50
+            else:
+                score = 0
+        score = rouge_score
         results = {
             'model': self.model_to_test_description,
             'context_length': int(context_length),
@@ -704,7 +716,8 @@ class LLMNeedleHaystackTester:
             print(f"Context: {context_length} tokens")
             print(f"Depth: {depth_percent}" + ("%" if self.document_depth_last_tokens is None else " tokens") + ("" if len(needle_positions[0]) == 1 else " " + str(needle_positions[0][1][0])))
             print(f"Score: {score}")
-            print(f"Response: {response}\n")
+            print(f"Response: {response}")
+            print(f"Needle2: {self.needle2}")
         # input("Waiting for input.")
         context_file_location = f'{self.model_version.replace(".", "_")}_len_{context_length}_depth_{int(depth_percent * 100)}'
 
@@ -758,9 +771,9 @@ class LLMNeedleHaystackTester:
             return self._examples
         examples = ""
         if hasattr(self, "examples") and len(self.examples) > 0:
-                examples += "Here are some example questions. You don't have to answer them:\n"
+                # examples += "Here are some example questions. You don't have to answer them:\n"
                 for example in self.examples:
-                    examples += f"{example.needle}\n"
+                    examples += f"{example.needle} {example.cot}\n"
                 examples += "End of examples. "
         if len(examples) == 0:
             tokens_examples = []
@@ -790,7 +803,7 @@ class LLMNeedleHaystackTester:
             if _depth_percent < depth_percent - 1e-5:
                 continue
             # print("Generate", _depth_percent)
-            question = f"\nBased on the content of the book, Question: {self.retrieval_question}\nAnswer: "
+            question = f"\nBased on the content of the book, Question: {self.retrieval_question}\nAnswer: Let's first repeat the problem description and reasoning."
             # question += "The answer is "
             modified_context_tokens, context_string, needle_position = self.insert_needle(context, _depth_percent, context_length, question)
 
@@ -835,9 +848,10 @@ class LLMNeedleHaystackTester:
 
         # print(f"Context: {[context]}")
         # print(f"Needle: {self.needle}")
-        tokens_needle = self.encode_text_to_tokens(self.needle)
-
-
+        # tokens_needle = self.encode_text_to_tokens("\n!!! THE FOLLOWING PART IS VERY IMPORTANT. IT CONTAINS PROBLEM INFORMATION: **" + self.needle + "**\n")
+        tokens_needle = self.encode_text_to_tokens(self.needle)  # [xxx]
+        # tokens_needle = self.encode_text_to_tokens(self.needle, ignore_special_tokens=False)  # [1, xxx]
+        print("Needle:", tokens_needle)
         tokens_distractors = [self.encode_text_to_tokens(d.needle) for d in self.distractors]
         # print("Distractors:", [d.needle for d in self.distractors])
         # print(f"Tokens_needle: {tokens_needle[:10]}")
@@ -867,8 +881,16 @@ class LLMNeedleHaystackTester:
         tokens_context_with_bos = tokens_context_with_bos[:max_length]
 
         def change_tokens_context_to_space(tokens_context, skip_special_tokens=True):
+            if getattr(self, "filler", None) is None:
+                self.filler = "\n!!! THE FOLLOWING PART IS VERY IMPORTANT. IT CONTAINS PROBLEM INFORMATION: **IMPORTANT INFORMATION**\n"
+                self.filler_tokens = self.encode_text_to_tokens(self.filler)
+            print("??", tokens_context[:10])
             space_token = memoize_space(self.enc)[0]
-            return [space_token if t >= 3 or not skip_special_tokens else t for t in tokens_context]
+            return [space_token if i >= 1 or skip_special_tokens else t for i, t
+                    in enumerate(tokens_context)]  # space
+
+            # very important message filler
+            # return [self.filler_tokens[i % len(self.filler_tokens)] if t >= 3 or not skip_special_tokens else t for i, t in enumerate(tokens_context)]
 
         def insert_needle_inner(tokens_context, depth_percent, tokens_needle, lower_bound=0, print_info=""):
 
@@ -884,7 +906,8 @@ class LLMNeedleHaystackTester:
             if insertion_point <= 1:  # BOS
                 insertion_point = 1
                 if self.space_mode:
-                    tokens_context = change_tokens_context_to_space(tokens_context)
+                    tokens_context = change_tokens_context_to_space(tokens_context, skip_special_tokens=False)
+                print("!!!", tokens_context[:10])
                 tokens_new_context = tokens_context[:1] + tokens_needle + tokens_context[1:]
             else:
                 # Go get the position (in terms of tokens) to insert your needle
@@ -912,7 +935,8 @@ class LLMNeedleHaystackTester:
                 # print(print_info, "Insertion at", insertion_point)
 
                 if self.space_mode:
-                    tokens_new_context = change_tokens_context_to_space(tokens_new_context)
+                    tokens_new_context = change_tokens_context_to_space(tokens_new_context, skip_special_tokens=False)
+                    print("~!!!", tokens_new_context[:10])
                     tokens_context = change_tokens_context_to_space(tokens_context)
 
                 # Once we get there, then add in your needle, and stick the rest of your context in on the other end.
@@ -931,6 +955,7 @@ class LLMNeedleHaystackTester:
 
             # print("Old length:", len(tokens_new_context))
             tokens_new_context, insertion_point = insert_needle_inner(tokens_new_context, self.document_depth_percents[int_j], tokens_distractors[i], print_info="[distractor" + str(i) + "]")
+            print("_+_", insertion_point, tokens_new_context[:10])
             needle_position.append([insertion_point, insertion_point + len(tokens_distractors[i])])
             # print("Inserting distractor", i, "at", int_j, self.document_depth_percents[int_j], insertion_point)
             # print("New length:", len(tokens_new_context))
@@ -938,7 +963,9 @@ class LLMNeedleHaystackTester:
         # insert needle
         # if not self.split_cot:
         #     tokens_needle += tokens_cot
+        print("_ss_", tokens_new_context[:10])
         tokens_new_context, insertion_point = insert_needle_inner(tokens_new_context, depth_percent, tokens_needle, print_info="[needle]")
+        print("_s_", insertion_point, tokens_new_context[:10])
         needle_position.append([insertion_point, insertion_point + len(tokens_needle)])
         print("Inserting needle at", insertion_point, "with total length", len(tokens_new_context), "and needle length",
               len(tokens_needle), "and question length", len(tokens_examples_question))
@@ -1096,8 +1123,17 @@ def memoize_period(enc):
 def memoize_space(enc):
     if ' ' in token_dict:
         return token_dict[' ']
-    token_dict[' '] = enc.tokenize(".", ignore_special_tokens=True)
+    token_dict[' '] = enc.tokenize("  ", ignore_special_tokens=True)
     print("Space token:", token_dict[' '])
+    print("Space token", enc.tokenize("  "))
+    print("Space token", enc.tokenize("    "))
+    print("Space token", enc.tokenize("     "))
+    print("Space token", enc.tokenize("s b"))
+    print("S", enc.tokenize("s"))
+    print("B", enc.tokenize("b"))
+    print("Space token", enc.tokenize("\n"))
+    print("Space token", enc.tokenize("s\nb"))
+
     print("Space token:", f"[{enc.detokenize(token_dict[' '] + token_dict[' '])}]")
     print("----", enc.tokenize(enc.detokenize(token_dict[' '] + token_dict[' ']), ignore_special_tokens=True))
     return token_dict[' ']

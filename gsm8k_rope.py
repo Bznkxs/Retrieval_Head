@@ -304,9 +304,9 @@ class LLMNeedleHaystackTester:
                 self.string_to_tokenize = string_to_tokenize
                 self._tokens = None
 
-            def tokens(self):
+            def tokens(self, ignore_special_tokens=True):
                 if self._tokens is None:
-                    self._tokens = self.tokenizer(self.string_to_tokenize)
+                    self._tokens = self.tokenizer(self.string_to_tokenize, ignore_special_tokens=ignore_special_tokens)
                 return self._tokens
 
             def __str__(self):
@@ -323,6 +323,7 @@ class LLMNeedleHaystackTester:
         for problem, few_shot_problems in self.problem_generator.__iter__(self.num_problems, self.num_few_shots):
             if few_shots is None:
                 few_shots = ''.join([' '.join(_problem.format_problem(True)) + '\n' for _problem in few_shot_problems])
+                # few_shots = ""
                 few_shots = LazyTokenizedObject(few_shots)
             problem_description, prompt, _answer = problem.format_problem()
             problem_descriptions.append(LazyTokenizedObject(problem_description))
@@ -346,11 +347,12 @@ class LLMNeedleHaystackTester:
     def generate_problems_iter(self):
         batch_size = 1
         str_buf = []
+        token_buf = []
         positions_buf = []
         golden_buf = []
 
         for idx in range(len(self.problem_descriptions)):
-            few_shot_tokens = self.few_shots.tokens()
+            few_shot_tokens = self.few_shots.tokens(ignore_special_tokens=False)   # 1
             problem_description = self.problem_descriptions[idx]
             question = self.problem_generator.test_problems[idx].question
             prompt = self.prompts[idx]
@@ -361,25 +363,28 @@ class LLMNeedleHaystackTester:
                          [len(problem_description_tokens),
                           len(problem_description_tokens) + len(prompt_tokens)]]
             input_string = str(self.few_shots) + str(problem_description) + str(prompt)
+            input_token = problem_description_tokens + prompt_tokens
+            token_buf.append(input_token)
             str_buf.append(input_string)
             positions_buf.append(positions)
             golden_buf.append(self.answers[idx])
             if len(str_buf) >= batch_size:
-                yield str_buf, positions_buf, golden_buf, question
+                yield token_buf, str_buf, positions_buf, golden_buf, question
+                token_buf = []
                 str_buf = []
                 positions_buf = []
                 golden_buf = []
         if len(str_buf) > 0:
-            yield str_buf, positions_buf, golden_buf, ""
+            yield token_buf, str_buf, positions_buf, golden_buf, ""
 
     def evaluate_and_log(self, context_length):
         save_name = self.model_version
-        for idx, (input_prompt_list, positions, golden, question) in enumerate(self.generate_problems_iter()):
+        for idx, (input_prompt_list, input_prompt_list_str, positions, golden, question) in enumerate(self.generate_problems_iter()):
             golden = golden[0]
             test_start_time = time.time()
-            output = self.model_to_test(prompt_list=input_prompt_list, tokens_to_generate=66,
+            output = self.model_to_test(prompt_list=input_prompt_list, tokens_to_generate=80,
                                         needle_positions=positions, distance_between_positions=int(context_length))
-            response = output[len(input_prompt_list[0]):].strip()  # extract only the model response
+            response = output[len(input_prompt_list_str[0]):].strip()  # extract only the model response
 
             test_end_time = time.time()
             test_elapsed_time = test_end_time - test_start_time
@@ -416,7 +421,7 @@ class LLMNeedleHaystackTester:
                 scores = {"strict": score, "flex": score}
             scores["loose"] = compare(match_all, golden, None)
 
-            results = self.generate_result_object(context_length, idx, input_prompt_list[0], response, scores,
+            results = self.generate_result_object(context_length, idx, input_prompt_list_str[0], response, scores,
                                                   test_elapsed_time,)
 
             if self.print_ongoing_status:
