@@ -57,6 +57,8 @@ from collections import defaultdict
 import time
 import requests
 
+# answer_string = "Answer: Let's first repeat the problem description and reasoning."
+answer_string = "Answer: "
 questions_raw = [
     {
         "_question": "A bakery produces 173 loaves of bread each day. The head baker sets aside three loaves for breakfast and uses four loaves to prepare sandwiches for the staff. The remaining loaves are sold at the bakery for $2 each. How much in dollars does the bakery make every day from selling the bread?",
@@ -147,9 +149,9 @@ def megatron_client_generate(url, prompt_list, tokens_to_generate, window_size=N
     # print("Generate", len(prompt_list))
     data = {"prompts": prompt_list, "tokens_to_generate": tokens_to_generate,
 
-            "ignore_special_tokens": True, "add_BOS": False, "random_seed": 0, "top_k": 1,
-            "window_size": window_size, "stop_on_eol": True, "prevent_newline_after_colon": True,
-            "oracle_mode": oracle_mode, "distance_between_positions": distance_between_positions,
+            "ignore_special_tokens": False, "add_BOS": False, "random_seed": 0, "top_k": 1,
+            "window_size": window_size, "stop_on_eol": False, "prevent_newline_after_colon": True,
+            "pattern_mode": "off" if oracle_mode == "off" else ("oracle" if oracle_mode == "on" else "dynamic"), "distance_between_positions": distance_between_positions,
             "attention_save_file": attention_save_file}  # for future implementation
     if needle_positions:
         data["oracle_positions"] = needle_positions
@@ -254,7 +256,7 @@ class GSM8kNeedle:
             elif cot_level == 5:
                 self.cot += " ".join(self.target["cot"][:-1]) + " " + self.target["cot"][-1].split("=")[0] + "..."
         if show_few_shot_answer:
-            self.cot += "\n Question: " + self.target["question_only"] + " Answer: Let's first repeat the problem description and reasoning." + self.needle + ". " + self.cot + ". Finally, the answer is " + self.target["answer_only"] + ".\n"
+            self.cot += "\n Question: " + self.target["question_only"] + " " + answer_string + self.needle + ". " + self.cot + ". Finally, the answer is " + self.target["answer_only"] + ".\n"
         # self.needle += self.cot
         self.question = self.target["question_only"]
         self.answer = self.target["answer_only"]
@@ -657,16 +659,18 @@ class LLMNeedleHaystackTester:
         # self.real_needle = "eat a sandwich and sit in Dolores Park on a sunny day"
         self.prompt_ids = input_ids
 
-        output = self.model_to_test(prompt_list=input_context, tokens_to_generate=200, needle_positions=needle_positions,
+        output = self.model_to_test(prompt_list=input_context, tokens_to_generate=250, needle_positions=needle_positions,
                                     attention_save_file=self.attention_save_file + "_" + str(context_length) + "_" + str(depth_percent))
         # print("Response:", output)
         question = f"Based on the content of the book"
         # question += "The answer is"
-        response = output.split(question)[1].split("Let's first repeat the problem description and reasoning.")[1].strip()
+        response = output.split(question)[1].split("Answer:")[
+            1].strip()
+        # response = output.split(question)[1].split("Let's first repeat the problem description and reasoning.")[1].strip()
         self.needle2 = self.needle_generator.pool["needle"].needle + self.needle_generator.pool["needle"].cot_2
         response = ''.join(re.split(r'<<.*?>>', response))
         self.needle2 = ''.join(re.split(r'<<.*?>>', self.needle2))
-        rouge_score = scorer.score(self.needle2, response)['rouge1'].recall*100
+        rouge_score = scorer.score(self.needle2, response)['rouge1'].recall * 100
 
 
 
@@ -693,7 +697,7 @@ class LLMNeedleHaystackTester:
                 score = 50
             else:
                 score = 0
-        score = rouge_score
+        # score = rouge_score
         results = {
             'model': self.model_to_test_description,
             'context_length': int(context_length),
@@ -703,6 +707,7 @@ class LLMNeedleHaystackTester:
             'needle_positions': needle_positions,
             'model_response': response,
             'score': score,
+            'retrieval_score': rouge_score,
             'test_duration_seconds': test_elapsed_time,
             'test_timestamp_utc': datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S%z'),
             'input': input_ids,
@@ -716,6 +721,7 @@ class LLMNeedleHaystackTester:
             print(f"Context: {context_length} tokens")
             print(f"Depth: {depth_percent}" + ("%" if self.document_depth_last_tokens is None else " tokens") + ("" if len(needle_positions[0]) == 1 else " " + str(needle_positions[0][1][0])))
             print(f"Score: {score}")
+            print(f"Retrieval Score: {rouge_score}" )
             print(f"Response: {response}")
             print(f"Needle2: {self.needle2}")
         # input("Waiting for input.")
@@ -762,7 +768,7 @@ class LLMNeedleHaystackTester:
             self.needle += self.cot
         self.distractors = self.needle_generator.pool["distractors"]
         self.examples = self.needle_generator.pool["examples"]
-        self.retrieval_question = self.needle_generator.pool["needle"].question
+        self.retrieval_question = self.needle_generator.pool["needle"].problem_description
         self.real_needle = self.needle_generator.pool["needle"].answer
         print("Gen needle => example", len(self.examples), ", distractor", len(self.distractors))
 
@@ -803,7 +809,7 @@ class LLMNeedleHaystackTester:
             if _depth_percent < depth_percent - 1e-5:
                 continue
             # print("Generate", _depth_percent)
-            question = f"\nBased on the content of the book, Question: {self.retrieval_question}\nAnswer: Let's first repeat the problem description and reasoning."
+            question = f"\nBased on the content of the book, Question: {self.retrieval_question}\n{answer_string}"
             # question += "The answer is "
             modified_context_tokens, context_string, needle_position = self.insert_needle(context, _depth_percent, context_length, question)
 
@@ -856,7 +862,7 @@ class LLMNeedleHaystackTester:
         # print("Distractors:", [d.needle for d in self.distractors])
         # print(f"Tokens_needle: {tokens_needle[:10]}")
         tokens_context_with_bos = self.encode_text_to_tokens(context, ignore_special_tokens=False)
-        # print("Tokens_context:", tokens_context_with_bos[:10])
+        print("Tokens_context:", tokens_context_with_bos[:10])
         # Reducing the context length by 150 buffer. This is to account for system message, the user question, and response.
         context_length -= self.final_context_length_buffer
         if question:
@@ -877,7 +883,7 @@ class LLMNeedleHaystackTester:
                                                           depth_percent=depth_percent):
             max_length -= len(tokens_distractors[i])
 
-        max_length = max(max_length, 0)
+        max_length = max(max_length, 1)
         tokens_context_with_bos = tokens_context_with_bos[:max_length]
 
         def change_tokens_context_to_space(tokens_context, skip_special_tokens=True):
