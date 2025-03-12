@@ -126,7 +126,7 @@ class GSM8KProblem:
                 "[Answer] \n" + self.answer_str + '.')
 
 
-    def format_problem(self):
+    def format_problem(self, retrieval_format=False):
         """
         returns: problem_description, prompt, answer
         """
@@ -138,7 +138,10 @@ class GSM8KProblem:
         _problem_description += ''.join(cot_step_format(self.get_cot_step(idx))
                                         for idx in range(len(self.cot_steps) - 1))
         last_step = self.get_cot_step(-1)
-        return (_problem_description, "\n# Question\n" + self.question_str + "\n# Answer\nLet's first repeat the Problem Description and Analysis. ## Problem Description",
+        prompt_str = "\n# Question\n" + self.question_str + "\n# Answer\n"
+        if retrieval_format:
+            prompt_str += "Let's first repeat the Problem Description and Analysis. ## Problem Description"
+        return (_problem_description, prompt_str,
                 "The answer is " + self.answer_str + '.')
 
 class GSM8KProblemGenerator:
@@ -146,11 +149,12 @@ class GSM8KProblemGenerator:
     example_iter(num_few_shots=0): yields GSM8KProblem, List[GSM8KProblem]
     """
 
-    def __init__(self, path="openai/gsm8k", subset="socratic"):
+    def __init__(self, path="openai/gsm8k", subset="socratic", retrieval_format=False):
         # load dataset
         self.dataset = load_dataset(path, subset)
         self.train_set = self.dataset["train"]
         self.test_set = self.dataset["test"]
+        self.retrieval_format = retrieval_format
 
         # build objects
         self.train_problems = [GSM8KProblem(item["question"], item["answer"]) for item in self.train_set]
@@ -165,7 +169,7 @@ class GSM8KProblemGenerator:
         yielded_problems = 0
         for test_problem in self.test_problems:
             answer = test_problem.answer_num
-            problem_description, _, _ = test_problem.format_problem()
+            problem_description, _, _ = test_problem.format_problem(retrieval_format=self.retrieval_format)
             numbers_in_description = extract_numbers(problem_description)
             same_number_exists = False
             for number in numbers_in_description + numbers_in_few_shot:
@@ -482,9 +486,11 @@ class LLMNeedleHaystackTester:
 
     def __init__(self, experiment_name, url, num_few_shots=0, context_lengths_min=0, context_lengths_max=4096,
                  context_lengths_num_intervals=1, save_results=True, skip_existing=False, num_problems=10,
-                 filler_type="fake_distance"):
+                 filler_type="fake_distance", retrieval_format=False):
         self.model_to_test_description = experiment_name
         self.model_version = "rope_gsm8k_" + experiment_name + "_filler_" + filler_type
+        if retrieval_format:
+            self.model_version += "_retrieval"
         self.service_url = url
         self.num_few_shots = num_few_shots
         self.print_ongoing_status = True
@@ -493,6 +499,7 @@ class LLMNeedleHaystackTester:
         self.skip_existing = skip_existing
         self.num_problems = num_problems
         self.filler_type = filler_type
+        self.retrieval_format = retrieval_format
 
         self.model_to_test = MegatronModel(self.service_url)
         self.enc = self.model_to_test
@@ -514,19 +521,21 @@ class LLMNeedleHaystackTester:
                         endpoint=True)).astype(int)
 
         # (prompt_list, tokens_to_generate, needle_positions)
-        self.problem_generator = GSM8KProblemGenerator()
+        self.problem_generator = GSM8KProblemGenerator(retrieval_format=retrieval_format)
         # prepare data
         self.problem_descriptions, self.prompts, self.few_shots, self.answers_number = self.prepare_problems()
         self.results = []
         # print(self.answers)
 
-    def generate_result_object(self, fake_context_length, index, needle, response, score, test_elapsed_time, ):
+    def generate_result_object(self, fake_context_length, index, needle, response, score, test_elapsed_time,
+                               question):
         return {
             'model': self.model_to_test_description,
             'context_length': int(fake_context_length),
             'index': index,
             'version': self.results_version,
             'needle': needle,
+            "question": question,
             'model_response': response,
             'score': score,
             'test_duration_seconds': test_elapsed_time,
@@ -560,7 +569,7 @@ class LLMNeedleHaystackTester:
         few_shots = None
 
         for problem, few_shot_problems in self.problem_generator.__iter__(self.num_problems, self.num_few_shots):
-            problem_description, prompt, _answer = problem.format_problem()
+            problem_description, prompt, _answer = problem.format_problem(retrieval_format=self.retrieval_format)
             problem_descriptions.append(LazyTokenizedObject(problem_description))
             prompts.append(LazyTokenizedObject(prompt))
             answers.append(problem.answer_num)
@@ -651,27 +660,27 @@ class LLMNeedleHaystackTester:
                 scores = {"strict": score, "flex": score}
             scores["loose"] = compare(match_all, golden_number, None)
             scores["rouge"] = rouge_score
-            results = self.generate_result_object(context_length, idx, filler.get_input_string(), response, scores,
-                                                  test_elapsed_time, )
+            results = self.generate_result_object(context_length, idx, problem_description_string, response, scores,
+                                                  test_elapsed_time, prompt_string)
 
             if self.print_ongoing_status:
                 print()
-                print(f"---- Test Summary ---- ")
-                print(f"Duration: {test_elapsed_time:.1f} seconds")
-                print(f"Context: {context_length} tokens")
-                print(f"Index: {idx}")
-                print(f"Needle: {problem_description_string}")
-                print(f"Question: {question_string}")
-                print(f"Response: `{response}`")
-                print(f"Correct answer: {golden_number}")
-                print(f"Score: {scores['strict']}/{scores['flex']}/{scores['loose']}")
-                print(f"Retrieval Score: {rouge_score}")
+                print(f"\033[32m---- Test Summary ----\033[0m ")
+                print(f"\033[32mDuration:\033[0m {test_elapsed_time:.1f} seconds\033[0m ")
+                print(f"\033[32mContext:\033[0m {context_length} tokens")
+                print(f"\033[32mIndex:\033[0m {idx}")
+                print(f"\033[32mNeedle:\033[0m {problem_description_string}")
+                print(f"\033[32mQuestion:\033[0m {prompt_string}")
+                print(f"\033[32mResponse:\033[0m `{response}`")
+                print(f"\033[32mCorrect answer:\033[0m {golden_number}")
+                print(f"\033[32mScore:\033[0m {scores['strict']}/{scores['flex']}/{scores['loose']}")
+                print(f"\033[32mRetrieval Score:\033[0m {rouge_score}")
                 debug(f"Input: `{filler.get_input_string()[:100].__repr__()}`...")
                 debug(f"Input tokens: {filler.context_tokens[:8]}... of len {len(filler.context_tokens)}")
                 debug(f"Positions: {filler.needle_positions}")
                 debug(f"Tokens to generate: {self.model_to_test.tokens_to_generate}")
 
-                print(f"--- End Of Summary --- ")
+                print(f"\033[32m--- End Of Summary --- \033[0m")
 
             self.results.append(results)
             # input("Waiting for input.")
@@ -690,32 +699,47 @@ class LLMNeedleHaystackTester:
 
     def summarize(self):
         score_per_length = {}
+        retrieval_score_per_length = {}
         for result in self.results:
             # for now only check "loose"
             c_l = result["context_length"]
             l_s = result["score"]["loose"]
+            l_r = result["score"]["rouge"]
             if not score_per_length.get(c_l, None):
                 score_per_length[c_l] = []
+                retrieval_score_per_length[c_l] = []
             score_per_length[c_l].append(l_s)
+            retrieval_score_per_length[c_l].append(l_r)
 
         # calculate average
+
         full_score = 0
+        full_retrieval = 0
         n_samples = 0
         for c_l in score_per_length:
             full_score += sum(score_per_length[c_l])
+            full_retrieval += sum(retrieval_score_per_length[c_l])
             n_samples += len(score_per_length[c_l])
             score_per_length[c_l] = sum(score_per_length[c_l]) / max(1, len(score_per_length[c_l]))
+            retrieval_score_per_length[c_l] = sum(retrieval_score_per_length[c_l]) / max(1, len(retrieval_score_per_length[c_l]))
+
 
         lengths = list(score_per_length.keys())
         lengths.sort()
 
+        print()
+        print("#### Final Summary ####")
         for length in lengths:
             print(f"{length:6}", end=" ")
         print()
         for length in lengths:
             print(f"{score_per_length[length] / 100:.4f}", end=" ")
-        print()
+        print("< reasoning")
+        for length in lengths:
+            print(f"{retrieval_score_per_length[length] / 100:.4f}", end=" ")
+        print("< retrieval")
         print("Overall:", full_score / max(1, n_samples))
+        print("Retrieval:", full_retrieval / max(1, n_samples))
 
     def result_exists(self, context_length, idx):
         """
@@ -796,7 +820,7 @@ if __name__ == "__main__":
     parser.add_argument("--num_problems", type=int, default=10, help="number of problems")
     parser.add_argument("--filler", type=str, help='["essay", "fake_distance", "sequence_space", "sequence_<str>", "..."]')
     parser.add_argument("--debug", action="store_true", help="debug mode")
-
+    parser.add_argument("--retrieval", action="store_true", help="retrieval mode")
     # parser = add_args(parser)
     args = parser.parse_args()
 
@@ -816,7 +840,8 @@ if __name__ == "__main__":
                                  skip_existing=args.skip_existing,
                                  num_few_shots=0,
                                  num_problems=args.num_problems,
-                                 filler_type=args.filler
+                                 filler_type=args.filler,
+                                 retrieval_format=args.retrieval
                                  )
 
     ht.start_test(args)
