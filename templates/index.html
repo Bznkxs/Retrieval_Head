@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Manager</title>
+
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@4.0.0/dist/css/bootstrap.min.css" integrity="sha384-Gn5384xqQ1aoWXA+058RXPxPg6fy4IWvTNh0E263XmFcJlSAwiGgFAW/dAiS6JXm" crossorigin="anonymous">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}">
+</head>
+<body>
+    <h1> Manager </h1>
+    <div id="experiment_list">
+        <div id="experiment_list_list">
+
+        </div>
+
+        <div>
+            <label for="new-experiment-name-input">Name</label><input id="new-experiment-name-input" type="text" placeholder="Name">
+            <label for="new-experiment-version-input">Version</label><input id="new-experiment-version-input" type="text" placeholder="Version">
+            <label for="new-experiment-type-input">Type</label><input id="new-experiment-type-input" type="text" placeholder="Type">
+            <label for="new-experiment-tester-input">Tester Class</label><input id="new-experiment-tester-input" type="text" placeholder="Tester class name">
+            <label for="new-experiment-specs-input">Specs</label><textarea id="new-experiment-specs-input" name="specs" cols="40" rows="5"></textarea>
+            <label for="new-experiment-running-specs-input">Running Specs</label><textarea id="new-experiment-running-specs-input" name="rspecs" cols="40" rows="5"></textarea>
+        </div>
+        <div id="button-new-experiment" class="btn">New Experiment</div>
+    </div>
+    <div id="node_list">
+        <div id="node_list_list">
+        </div>
+        <div id="button-kill-all-megatron" class="btn">Kill All Megatron Jobs</div>
+        <div id="button-submit-megatron" class="btn">Submit Megatron Jobs</div>
+        <label for="megatron_list_of_argument_input">List of arguments:</label><textarea id="megatron_list_of_argument_input"></textarea>
+    </div>
+    <div id="button-refresh" class="btn">Refresh</div>
+
+    <div id="job_list">
+        <div id="job_list_list"></div>
+        <label for="sbatch-script-file-input">Import sbatch settings from sbatch file</label>
+        <input id="sbatch-script-file-input" type="text" placeholder="~/runbatch.sh">
+        <div id="button-import-setting" class="btn">Import</div>
+        <div id="button-submit-job" class="btn">Submit</div>
+        <div>
+            <label for="new-job-settings-input">Sbatch settings:</label><textarea id="new-job-settings-input"></textarea>
+        </div>
+        <div id="auto-management-div">
+            <div id="nodes_cnt_div"></div>
+            <label for="auto-management-nodes-input">Keep this number of nodes submitted:</label><input id="auto-management-nodes-input" type="text" placeholder="How many nodes?">
+            <div id="button-auto-management" class="btn">Current Status: Off. Turn On Auto Management</div>
+
+        </div>
+    </div>
+    <div id="operation-status-div"></div>
+    <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+</body>
+</html>

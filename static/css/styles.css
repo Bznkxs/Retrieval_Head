@@ -1,0 +1,12 @@
+body {
+    font-family: monospace;
+}
+
+.button {
+    background: azure;
+}
+
+.spec_head {
+    font-weight: bolder;
+    font-size: larger;
+}

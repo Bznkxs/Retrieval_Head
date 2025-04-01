@@ -379,13 +379,12 @@ class LLMNeedleHaystackTester:
         # question = f"Based on the content of the book, Question: {self.retrieval_question}\nAnswer:"
         input_context = context
         # input_ids = context
-
         test_start_time = time.time()
 
         self.real_needle = "eat a sandwich and sit in Dolores Park on a sunny day"
         self.prompt_ids = input_ids
 
-        output = self.model_to_test(prompt_list=input_context, tokens_to_generate=50)
+        output = self.model_to_test(prompt_list=input_context, tokens_to_generate=self.needle_len + 2)
         question = f"Based on the content of the book, Question: {self.retrieval_question}\nAnswer:"
         response = output.split(question)[1].strip()
 
@@ -496,12 +495,13 @@ class LLMNeedleHaystackTester:
             return self.batch_input[i: i + self.batch_size], self.batch_input[i]
         return None, self.batch_input[i]
 
-    def encode_text_to_tokens(self, text):
-        return self.enc.tokenize(text)
+    def encode_text_to_tokens(self, text, **kwargs):
+        return self.enc.tokenize(text, **kwargs)
     def insert_needle(self, context, depth_percent, context_length):
         # print(f"Context: {[context]}")
         # print(f"Needle: {self.needle}")
         tokens_needle = self.encode_text_to_tokens(self.needle)
+        self.needle_len = len(tokens_needle)
         # print(f"Tokens_needle: {tokens_needle[:10]}")
         tokens_context = self.encode_text_to_tokens(context)
         # print("Tokens_context:", tokens_context[:10])
@@ -540,7 +540,7 @@ class LLMNeedleHaystackTester:
 
         # Convert back to a string and return it
         # print("")
-        new_context = self.decode_tokens(tokens_new_context, ignore_special_tokens=False)
+        new_context = self.decode_tokens(tokens_new_context, ignore_special_tokens=True)
         # print("New context:", [new_context[:100]])
         return new_context
 

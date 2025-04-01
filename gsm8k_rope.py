@@ -32,16 +32,20 @@ python -u needle_in_haystack.py --s_len 0 --e_len 128000\
     --model_path ../../../llama-2-7b-80k
 ) 2>&1  | tee logs/eval_llama-2-7b-80k.log
 """
+import concurrent
+import copy
 import math
 #import tiktoken
 import os
 import glob
 import json
+import threading
 from functools import partial
 import sys
 import random
 import re
-from typing import List
+from pathlib import Path
+from typing import List, Optional
 
 import numpy as np
 
@@ -50,7 +54,6 @@ from rouge_score import rouge_scorer
 
 scorer = rouge_scorer.RougeScorer(['rouge1', 'rougeL'], use_stemmer=True)
 
-
 import numpy as np
 import argparse
 
@@ -58,21 +61,49 @@ from datetime import datetime, timezone
 from collections import defaultdict
 import time
 import requests
+from os import getpid
+from os import getppid
+from threading import Lock
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import multiprocessing
 
 number_re_pattern = r"-?(?:\d+,)*\d+\.?\d*"
 
-_debug_flag = False
-def debug(*args, **kwargs):
-    if _debug_flag:
-        print("\033[90m", end="")
-        print(*args, **kwargs)
-        print("\033[0m", end="")
+output_level = "info"
 
-def extract_numbers(target_str):
-    numbers_str = re.findall(number_re_pattern, target_str)
+
+def debug(*args, print_lock=None, **kwargs):
+    if output_level == "debug":
+        if print_lock:
+            with print_lock:
+                debug(*args, **kwargs)
+        else:
+            print("\033[90m", end="")
+            print(*args, **kwargs)
+            print("\033[0m", end="")
+
+
+def info(*args, **kwargs):
+    if output_level == "debug" or output_level == "info":
+        print(*args, **kwargs)
+
+
+def extract_numbers(target_str, remove_bullet_number=True):
+    # split into lines
+    target_str_lines = target_str.split("\n")
+    # remove spaces
+    target_str_lines = [target_str_line.strip() for target_str_line in target_str_lines]
     numbers = []
-    for number in numbers_str:
-        numbers.append(float(number.strip().replace(",", '')))
+    for target_str_line in target_str_lines:
+        if remove_bullet_number:
+            bullet_number_match = re.match(r"^\s*\d+\.\s", target_str_line)
+            if bullet_number_match:
+                target_str_line = target_str_line[bullet_number_match.span()[1]:]
+        numbers_str = re.findall(number_re_pattern, target_str_line)
+
+        for number in numbers_str:
+            num_str = (number.strip().replace(",", ''))
+            numbers.append(float(num_str))
     return numbers
 
 
@@ -84,7 +115,7 @@ class GSM8KProblem:
     get_cot_step(idx): {"index": idx, "answer": str [, "question": str]}
     """
 
-    def __init__(self, question_str, answer_str):
+    def __init__(self, question_str, answer_str, idx=None):
         self._question_str = question_str
         self.problem_description = question_str
         self.question_str = question_str.split(". ")[-1]
@@ -94,6 +125,7 @@ class GSM8KProblem:
         self.answer_str = answer
         self.answer_num = float(answer)
         self.cot_steps = [cot_step.split(" ** ") for cot_step in cot_str.strip().split("\n")]
+        self.idx = idx
 
     def get_cot_step(self, idx):
         cot_step = self.cot_steps[idx]
@@ -125,7 +157,6 @@ class GSM8KProblem:
         return (_problem_description, cot_step_format(last_step, contain_last_step_answer),
                 "[Answer] \n" + self.answer_str + '.')
 
-
     def format_problem(self, retrieval_format=False):
         """
         returns: problem_description, prompt, answer
@@ -144,6 +175,28 @@ class GSM8KProblem:
         return (_problem_description, prompt_str,
                 "The answer is " + self.answer_str + '.')
 
+
+class SimpleProblem:
+    def __init__(self, question_str, answer_str, idx=None):
+        self._question_str = question_str
+        self.problem_description = question_str.rsplit(". ", maxsplit=1)[0]
+        self.question_str = question_str.split(". ")[-1]
+        self._answer_str = answer_str
+        answer = answer_str
+        answer = answer.strip().replace(",", '')
+        self.answer_str = answer
+        self.answer_num = int(answer)
+        self.idx = idx
+
+    def format_problem(self, retrieval_format=False):
+        _problem_description = "# Problem Description\n" + self.problem_description
+        prompt_str = "\n# Question\n" + self.question_str + "\n# Answer\n"
+        answer_str = "The answer is " + self.answer_str + '.'
+        if retrieval_format:
+            prompt_str += "Let's first repeat the Problem Description and Question. ## Problem Description"
+        return (_problem_description, prompt_str, answer_str)
+
+
 class GSM8KProblemGenerator:
     """
     example_iter(num_few_shots=0): yields GSM8KProblem, List[GSM8KProblem]
@@ -158,7 +211,8 @@ class GSM8KProblemGenerator:
 
         # build objects
         self.train_problems = [GSM8KProblem(item["question"], item["answer"]) for item in self.train_set]
-        self.test_problems = [GSM8KProblem(item["question"], item["answer"]) for item in self.test_set]
+        self.test_problems = [GSM8KProblem(item["question"], item["answer"], idx) for idx, item in
+                              enumerate(self.test_set)]
 
     def __iter__(self, max_problems=None, num_few_shots=0):
         few_shot_examples = self.train_problems[:num_few_shots]
@@ -179,6 +233,34 @@ class GSM8KProblemGenerator:
             if same_number_exists:
                 continue
             yield test_problem, few_shot_examples
+            yielded_problems += 1
+            if yielded_problems == max_problems:
+                return
+
+
+class SimpleProblemGenerator:
+    def __init__(self, retrieval_format=False):
+        random.seed(1)
+        self.retrieval_format = retrieval_format
+        self.test_problems = []
+        while len(self.test_problems) < 100:
+            a = [random.randint(-100, 100) for _ in range(50)]
+            b = random.choices(list(range(50)), k=3)
+            c = 0
+            for i in b:
+                c += a[i]
+            qstr = "Let " + ", ".join(f"x_{i}={ai}" for i, ai in enumerate(a)) + ". "
+            qstr += "If " + ", ".join(f"y_{i}=x_{bi}" for i, bi in enumerate(b)) + ", "
+            qstr += "then what is " + "+".join(f"y_{i}" for i in range(len(b))) + "?"
+
+            self.test_problems.append(SimpleProblem(qstr, f"{c}",
+                                                    len(self.test_problems)))
+
+    def __iter__(self, max_problems=None, num_few_shots=0):
+        yielded_problems = 0
+        for test_problem in self.test_problems:
+            problem_description, _, _ = test_problem.format_problem(retrieval_format=self.retrieval_format)
+            yield test_problem, []
             yielded_problems += 1
             if yielded_problems == max_problems:
                 return
@@ -205,9 +287,9 @@ def megatron_client_generate(url, prompt_list, tokens_to_generate, window_size=N
             for position in needle_position:
                 assert isinstance(position, list)
                 assert len(position) == 2
-    assert isinstance(distance_between_positions, int), f"{distance_between_positions} of Class {distance_between_positions.__class__}"
+    assert isinstance(distance_between_positions,
+                      int), f"{distance_between_positions} of Class {distance_between_positions.__class__}"
 
-    # print("Generate", len(prompt_list))
     data = {"prompts": prompt_list, "tokens_to_generate": tokens_to_generate,
 
             "ignore_special_tokens": True, "add_BOS": False, "random_seed": 0, "top_k": 1,
@@ -215,7 +297,7 @@ def megatron_client_generate(url, prompt_list, tokens_to_generate, window_size=N
             "distance_between_positions": distance_between_positions}  # for future implementation
     if needle_positions:
         data["oracle_positions"] = needle_positions
-    # print(data)
+
     # return [prompt_list[0] + f" This is some sample answer: Distance is {distance_between_positions}. "
     #                          f"Great work! The answer is: 1. 2. 3. 4. 5. 6. 7. 8. 9. 10. 11. 12. 13. 14. 15. 16. 17. 18. 19. 20. -1. -2. -3. -4. -5. 10. "]
 
@@ -237,7 +319,7 @@ def megatron_client_tokenize(url, text, **kwargs):
     text: the sequence to tokenize
     """
     headers = {'Content-Type': 'application/json'}
-    # print("Tokenize 1")
+
     data = {"texts": [text], "add_BOS": False, "ignore_special_tokens": True}
     # add kwargs to data
     for key, value in kwargs.items():
@@ -253,7 +335,7 @@ def megatron_client_tokenize(url, text, **kwargs):
 
 def megatron_client_detokenize(url, tokens, **kwargs):
     headers = {'Content-Type': 'application/json'}
-    # print("Detokenize 1")
+
     data = {"tokens": [tokens], "no_log": False, "ignore_special_tokens": True}
     data.update(kwargs)
     response = requests.put(url, data=json.dumps(data), headers=headers)
@@ -299,6 +381,15 @@ class MegatronModel:
         MegatronModel.total_number += 1
         self.tokens_to_generate = tokens_to_generate
 
+    def __repr__(self):
+        return f"<Model {self.url}>"
+
+    def __hash__(self):
+        return hash(self.number)
+
+    def __eq__(self, other):
+        return isinstance(other, MegatronModel) and self.number == other.number
+
     def tokenize(self, text, **kwargs):
         return megatron_client_tokenize(get_url(self.url, "tokenize"), text, **kwargs)
 
@@ -343,16 +434,16 @@ class Filler:
         return self.context_string
 
 
-
-
 class FillerGenerator:
-    def __init__(self, filler_class, model, *args, **kwargs):
+    def __init__(self, filler_class, model=None, *args, **kwargs):
         self.filler_class = filler_class
         self.model = model
         self.args = args
         self.kwargs = kwargs
 
     def generate_filler(self, length):
+        if self.model is None:
+            raise ValueError("Model must be provided")
         return self.filler_class(length, self.model, *self.args, **self.kwargs)
 
     @staticmethod
@@ -364,8 +455,6 @@ class FillerGenerator:
         }
         filler_class_cls = filler_class_map[filler_class]
         return FillerGenerator(filler_class_cls, model, *args, **kwargs)
-
-
 
 
 class PaulGrahamEssayFiller(Filler):
@@ -437,6 +526,7 @@ class PaulGrahamEssayFiller(Filler):
                                    self.context_tokens[insertion_point:])
             self.needle_positions.append([insertion_point, len(needle_tokens) + insertion_point])
             # insert the needles from front to back if there are multiple ones
+        debug(f"Needle: Position {self.needle_positions[-1]}, Length {len(self.context_tokens)}")
         self.context_string = self.model.detokenize(self.context_tokens, ignore_special_tokens=True)
 
 
@@ -467,70 +557,259 @@ class FakeDistanceFiller(Filler):
     def __init__(self, length, model):
         super().__init__(length, model)
         self.needle_positions = []
-        self.needle_total_length = 0
+        self.needle_total_length = 1
         self.distance_between_positions = self.length
 
     def insert_needle(self, needle_tokens, insertion_point=None):
         self.needle_positions.append([self.needle_total_length, self.needle_total_length + len(needle_tokens)])
         self.needle_total_length += len(needle_tokens)
         self.context_tokens = self.context_tokens + needle_tokens
+        debug(f"Needle: Position {self.needle_positions[-1]}, Length {len(self.context_tokens)}")
         self.context_string = self.model.detokenize(self.context_tokens, ignore_special_tokens=True)
 
 
+class LazyTokenizedObject:
+    def __init__(self, string_to_tokenize, default_tokenizer=None, ignore_special_tokens=True):
+        self.tokenizer = default_tokenizer
+        self.string_to_tokenize = string_to_tokenize
+        self._tokens = None
+        self.ignore_special_tokens = ignore_special_tokens
+
+    def tokens(self, tokenizer=None, ) -> List[int]:
+        """
+        a tokenizer (MegatronModel.tokenize) is needed
+        """
+        if self._tokens is None:
+            if tokenizer is None:
+                tokenizer = self.tokenizer
+            self._tokens = tokenizer(self.string_to_tokenize, ignore_special_tokens=self.ignore_special_tokens)
+        return self._tokens
+
+    def __str__(self):
+        return self.string_to_tokenize
+
+    def __repr__(self):
+        return "LazyTokenizedObject(" + repr(self.string_to_tokenize) + ")"
 
 
-class LLMNeedleHaystackTester:
+class LazyTokenizedProblemObject:
+    def __init__(self, problem_idx: int,
+                 problem_description: LazyTokenizedObject,
+                 prompt: LazyTokenizedObject,
+                 answer_number,
+                 question_str: str):
+        self.problem_idx = problem_idx
+        self.problem_description = problem_description
+        self.prompt = prompt
+        self.answer_number = answer_number
+        self.question_str = question_str
+
+
+class Tester:
+    count = 0
+    def __init__(self, experiment_name, experiment_version, **test_specs):
+        self.experiment_name = experiment_name
+        self.experiment_version = experiment_version
+        self.specs = test_specs
+        self.specs_list = list((k, v) for k, v in self.specs.items())
+        self.specs_list.sort(key=lambda x: x[0])
+        self.savefile_root: Optional[str] = None
+        self.tester_id = f"Tester No. {self.count} Created at {datetime.isoformat(datetime.now())}; Experiment " \
+                         f"Name {experiment_name}; Version {experiment_version}; Specs {json.dumps(self.specs)}"
+        self.count += 1
+
+    def __hash__(self):
+        return hash(self.tester_id)
+
+    def get_status(self):
+        return "unknown"
+
+    def conventional_naming(self):
+        return self.experiment_name + ",".join(f"{k}={v}" for k, v in self.specs_list)
+
+    @staticmethod
+    def conventional_naming_template(experiment_name):
+        return experiment_name + "*"
+
+    def specs(self):
+        return self.specs
+
+    def is_running(self):
+        raise NotImplementedError
+
+    def stop(self):
+        raise NotImplementedError
+
+    def save_name(self):
+        return self.conventional_naming()
+
+    def save_path(self) -> str:
+        if self.savefile_root is None:
+            raise NotImplementedError
+        return os.path.join(self.savefile_root, self.save_name())
+
+    def dump_specs(self):
+        save_path = self.find_save_path()
+        with open(os.path.join(save_path, "test_info.json"), "w") as f:
+            json.dump({"type": "test",
+                       "experiment_name": self.experiment_name,
+                       "specs": self.specs,
+                       "created": datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S%z'), }, f)
+
+    def find_save_path(self, create_if_not_exist=True):
+        if os.path.exists(self.save_path()):
+            return self.save_path()
+        if create_if_not_exist:
+            os.makedirs(self.save_path(), exist_ok=True)
+            self.dump_specs()
+            return self.save_path()
+        return None
+
+    def standard_start_test_adapter(self, **kwargs):
+        raise NotImplementedError
+
+    def standard_run_test_api(self, **kwargs):
+        self.standard_start_test_adapter(**kwargs)
+
+    def finished(self):
+        raise NotImplementedError
+
+    @staticmethod
+    def parse_conventional_name(directory, experiment_name):
+        return {}
+
+class FillerTester(Tester):
     """
     This class is used to test the LLM Needle Haystack.
     """
 
-    def __init__(self, experiment_name, url, num_few_shots=0, context_lengths_min=0, context_lengths_max=4096,
-                 context_lengths_num_intervals=1, save_results=True, skip_existing=False, num_problems=10,
-                 filler_type="fake_distance", retrieval_format=False):
+    def __init__(self, experiment_name,
+                 experiment_version=None,
+                 savefile_root=None,
+                 experiment_specs_str=None,
+                 num_few_shots=0,
+                 filler_type="fake_distance",
+                 retrieval_format=False,
+                 problem_set="gsm8k",
+                 ):
+        super().__init__(experiment_name,
+                         experiment_version,
+                         num_few_shots=num_few_shots,
+                         filler_type=filler_type,
+                         retrieval_format=retrieval_format,
+                         problem_set=problem_set)
         self.model_to_test_description = experiment_name
-        self.model_version = "rope_gsm8k_" + experiment_name + "_filler_" + filler_type
-        if retrieval_format:
-            self.model_version += "_retrieval"
-        self.service_url = url
-        self.num_few_shots = num_few_shots
-        self.print_ongoing_status = True
-        self.save_results = save_results
-        self.results_version = 1
-        self.skip_existing = skip_existing
-        self.num_problems = num_problems
+        self.problem_set = problem_set
         self.filler_type = filler_type
-        self.retrieval_format = retrieval_format
-
-        self.model_to_test = MegatronModel(self.service_url)
-        self.enc = self.model_to_test
-
         if filler_type.startswith("sequence"):
-            filler_type = filler_type.replace("sequence_", "")
             self.filler_type = "sequence"
-            if filler_type == "space":
-                filler_args = [get_space_memoization(self.enc)]
-            else:
-                filler_args = [self.enc.tokenize(filler_type.split("str")[1])]
-        else:
-            filler_args = []
+        self.input_filler_type = filler_type
+        self.retrieval_format = retrieval_format
+        self.experiment_specs_str = experiment_specs_str or self.conventional_naming()
+        self.savefile_root = savefile_root or os.path.join("results", "rope")
+        self.results_version = experiment_version
+        self.num_few_shots = num_few_shots
 
-        self.filler_generator = FillerGenerator.create_filler_generator(self.filler_type, self.model_to_test, *filler_args)
+        self.service_url = None
+        self.print_ongoing_status = None
+        self.save_results = None
+        self.skip_existing = None
+        self.num_problems = None
+        self.context_lengths = None
 
-        self.context_lengths = np.round(
-            np.linspace(context_lengths_min, context_lengths_max, num=context_lengths_num_intervals,
-                        endpoint=True)).astype(int)
+        self.problem_index_range = None
+        self.model_to_test_list = None  # [MegatronModel(url) for url in self.service_url]
+        self.first_model = None  # self.model_to_test_list[0]  # shorthand
 
-        # (prompt_list, tokens_to_generate, needle_positions)
-        self.problem_generator = GSM8KProblemGenerator(retrieval_format=retrieval_format)
+        self.filler_generators = None
+
+        if problem_set == "gsm8k":
+            self.problem_generator = GSM8KProblemGenerator(retrieval_format=retrieval_format)
+        elif problem_set == "simple":
+            self.problem_generator = SimpleProblemGenerator(retrieval_format=retrieval_format)
         # prepare data
-        self.problem_descriptions, self.prompts, self.few_shots, self.answers_number = self.prepare_problems()
-        self.results = []
-        # print(self.answers)
+        (self.problem_descriptions, self.prompts, self.few_shots,
+         self.answers_number, self.lazy_tokenized_problem_objects) = self.prepare_problems()
+        self.results = None
+        self.model_mapping = None
+        self.temp_model_list = None
+        self._finished = False
+
+
+        self.stop_event = None
+        self.running_status = {}
+        self._status_text = "unknown"
+        self.running_status_lock = threading.Lock()
+
+    def get_status(self):
+        with self.running_status_lock:
+            return self._status_text
+
+    def add_running_thread(self, things):
+        with self.running_status_lock:
+            self.running_status[threading.get_ident()] = things
+
+    def pop_running_thread(self):
+        with self.running_status_lock:
+            if threading.get_ident() in self.running_status:
+                self.running_status.pop(threading.get_ident())
+
+    def get_thread_info(self):
+        with self.running_status_lock:
+            return copy.deepcopy(self.running_status)
+
+    def is_running(self):
+        with self.running_status_lock:
+            return len(self.running_status) > 0
+
+    def conventional_naming(self):
+        return (f"rope_{self.problem_set}_{self.experiment_name}_filler_"
+                f"{self.input_filler_type}{'_retrieval' if self.retrieval_format else ''}")
+
+    @staticmethod
+    def conventional_naming_template(experiment_name):
+        return f"rope_*_{experiment_name}_filler_*"
+
+    @staticmethod
+    def parse_conventional_name(directory, experiment_name):
+        directory = Path(directory).name
+        parts = directory.split(experiment_name)
+        if len(parts) != 2:
+            return None
+        first_part, second_part = parts
+        first_part = first_part.split("_")
+        if len(first_part) < 2:
+            return None
+        problem_set = first_part[1]
+        second_part = second_part.rstrip("_")
+        second_part = second_part.split("_")
+
+
+        if second_part[-1] == "retrieval":
+            retrieval = True
+            second_part = second_part[:-1]
+
+        else:
+            retrieval = False
+        if "filler" in second_part:
+            filler_idx = second_part.index("filler")
+            filler_type = "_".join(second_part[filler_idx+1:])
+        else:
+            return None
+        return {
+            "problem_set": problem_set,
+            "retrieval_format": retrieval,
+            "filler_type": filler_type,
+            # "num_few_shots": 0
+        }
+
 
     def generate_result_object(self, fake_context_length, index, needle, response, score, test_elapsed_time,
-                               question):
+                               question, golden_number):
         return {
-            'model': self.model_to_test_description,
+            'model': self.model_to_test_description,  # legacy
+            'experiment_name': self.experiment_name,
+            'specs': self.experiment_specs_str,
             'context_length': int(fake_context_length),
             'index': index,
             'version': self.results_version,
@@ -540,162 +819,325 @@ class LLMNeedleHaystackTester:
             'score': score,
             'test_duration_seconds': test_elapsed_time,
             'test_timestamp_utc': datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S%z'),
+            'golden_number': golden_number,
         }
 
     def prepare_problems(self):
-
-        tokenizer = self.enc.tokenize
-
-        class LazyTokenizedObject:
-            def __init__(self, string_to_tokenize):
-                self.tokenizer = tokenizer
-                self.string_to_tokenize = string_to_tokenize
-                self._tokens = None
-
-            def tokens(self, ignore_special_tokens=True):
-                if self._tokens is None:
-                    self._tokens = self.tokenizer(self.string_to_tokenize, ignore_special_tokens=ignore_special_tokens)
-                return self._tokens
-
-            def __str__(self):
-                return self.string_to_tokenize
-
-            def __repr__(self):
-                return "LazyTokenizedObject(" + repr(self.string_to_tokenize) + ")"
 
         problem_descriptions = []
         prompts = []
         answers = []
         few_shots = None
+        lazy_tokenized_problem_objects = []
 
         for problem, few_shot_problems in self.problem_generator.__iter__(self.num_problems, self.num_few_shots):
             problem_description, prompt, _answer = problem.format_problem(retrieval_format=self.retrieval_format)
-            problem_descriptions.append(LazyTokenizedObject(problem_description))
-            prompts.append(LazyTokenizedObject(prompt))
+            problem_description = LazyTokenizedObject(problem_description)
+            prompt = LazyTokenizedObject(prompt)
+            problem_descriptions.append(problem_description)
+            prompts.append(prompt)
             answers.append(problem.answer_num)
 
-        return problem_descriptions, prompts, few_shots, answers
+            # organize
+            question_str = problem.question_str
+            problem_idx = problem.idx
+            lazy_tokenized_problem_objects.append(
+                LazyTokenizedProblemObject(problem_idx, problem_description, prompt, problem.answer_num, question_str)
+            )
 
-    def run_test(self, args):
+        return problem_descriptions, prompts, few_shots, answers, lazy_tokenized_problem_objects
 
-        # Run through each iteration of context_lengths and depths
-        for context_length in self.context_lengths:
-            if context_length < args.s_len or context_length > args.e_len:
-                continue
-            self.evaluate_and_log(context_length)
+    def stop(self):
+        if not self.is_running():
+            return
+        if self.stop_event is None:
+            raise RuntimeError("Tester is running, but stop event is None")
+        self.stop_event.set()
+        t = 0
+        while self.is_running():
+            time.sleep(0.1)
+            t += 1
+            if t % 10 == 0:
+                debug(f"Stop(): still running: {self.get_thread_info()}")
 
-    def decode(self, q_outputs, inp, decode_len):
-        return q_outputs, None
+    def run_test(self, *, context_lengths_min,
+                 context_lengths_max,
+                 context_lengths_num_intervals,
+                 url_list,
+                 save_results=True,
+                 skip_existing=False,
+                 num_problems=None,
+                 problem_index_start=None, problem_index_end=None,
+                 print_ongoing_status=False,
+                 callback_function=None,
+                 stop_event=None
+                 ):
+        try:
+            self.add_running_thread({"role": "main"})
+            def callback_function_helper(thing):
+                if callback_function:
+                    callback_function(thing)
 
-    def generate_problems_iter(self):
+            # todo: implement stop signal for calling this function asynchronously
+            self.context_lengths = np.round(
+                np.linspace(context_lengths_min, context_lengths_max, num=context_lengths_num_intervals,
+                            endpoint=True)).astype(int)
 
-        for idx in range(len(self.problem_descriptions)):
-            problem_description = self.problem_descriptions[idx]
-            question_str = self.problem_generator.test_problems[idx].question_str
-            prompt = self.prompts[idx]
-            problem_description_tokens = problem_description.tokens()
-            prompt_tokens = prompt.tokens()
-            yield (problem_description_tokens, prompt_tokens,
-                   str(problem_description), str(prompt), self.answers_number[idx], question_str)
+            self.service_url = url_list.split(",")
+            if url_list.find("[") != -1:
+                prefix = url_list[:url_list.find("[")]
+                url_list = url_list[url_list.find("[") + 1:-1]
+                url_list = url_list.split(",")
+                self.service_url = [prefix + url + ":5000" for url in url_list]
+            self.save_results = save_results
+            self.skip_existing = skip_existing
+            self.num_problems = num_problems
+            self.problem_index_range = [problem_index_start, problem_index_end]
+            self.model_to_test_list = [MegatronModel(url) for url in self.service_url]
+            self.first_model = self.model_to_test_list[0]  # shorthand
+            self.print_ongoing_status = print_ongoing_status
 
-    def evaluate_and_log(self, context_length):
-        save_name = self.model_version
-        for idx, (problem_description_tokens, prompt_tokens,
-                  problem_description_string, prompt_string,
-                  golden_number, question_string) in enumerate(
-                self.generate_problems_iter()):
-
-            filler = self.filler_generator.generate_filler(int(context_length))
-            filler.insert_needle(problem_description_tokens, 0)   # insert problem description at the beginning
-            filler.insert_needle(prompt_tokens)   # insert prompt at the end
-
-            # debug(f"Input kwargs: {filler.model_generate_kwargs()}")
-
-            test_start_time = time.time()
-            response = filler.model_generate()
-
-            test_end_time = time.time()
-            test_elapsed_time = test_end_time - test_start_time
-
-            # problem description for comparison
-            problem_description_for_comparison = problem_description_string.replace("[Problem Description]\n", "").replace("[\nAnalysis]\n", "")
-            problem_description_for_comparison = ''.join(re.split(r"\(Q\).*?\(A\)", problem_description_for_comparison))
-            response = ''.join(re.split(r'<<.*?>>', response))
-            problem_description_for_comparison = ''.join(re.split(r'<<.*?>>', problem_description_for_comparison))
-            debug(f"Problem Description for Comparison: `{problem_description_for_comparison}`")
-
-            rouge_score = scorer.score(problem_description_for_comparison, response)['rouge1'].recall * 100
-
-            def compare(matches, golden_num, idx):
-                matches_num = matches
-                _scores = 0
-                if idx is None:
-                    idx = slice(None)
-                if isinstance(idx, slice):
-                    for num in matches_num[idx]:
-                        if abs(num - golden_num) < 1e-6:
-                            return 100
-                    return 0
-                if isinstance(idx, int):
-                    try:
-                        if abs(matches_num[idx] - golden_num) < 1e-6:
-                            return 100
-                        return 0
-                    except IndexError:
-                        return 0
-                return 0
-
-            match_all = extract_numbers(response)
-            debug("Match all numbers:", match_all)
-            debug(f"Raw response: `{response}`")
-            if response.find("Question") != -1:
-                response = response.split("Question")[0]
-            if response.find("he answer is") != -1:
-                target_sentence = response.split("he answer is")[-1]
-                match = extract_numbers(target_sentence)
-                scores = {"strict": compare(match, golden_number, -1), "flex": compare(match, golden_number, None)}
+            if self.input_filler_type.startswith("sequence"):
+                filler_type = self.input_filler_type.replace("sequence_", "")
+                self.filler_type = "sequence"
+                if filler_type == "space":
+                    filler_args = [get_space_memoization(self.first_model)]
+                else:
+                    filler_args = [self.first_model.tokenize(filler_type.split("str")[1])]
             else:
-                # find the last number
-                score = compare(match_all, golden_number, -1)
-                scores = {"strict": score, "flex": score}
-            scores["loose"] = compare(match_all, golden_number, None)
-            scores["rouge"] = rouge_score
-            results = self.generate_result_object(context_length, idx, problem_description_string, response, scores,
-                                                  test_elapsed_time, prompt_string)
+                filler_args = []
+
+            self.filler_generators = {
+                model: FillerGenerator.create_filler_generator(self.filler_type, model, *filler_args)
+                for model in self.model_to_test_list
+            }
+
+            self.results = []
+            self._finished = False
 
             if self.print_ongoing_status:
-                print()
-                print(f"\033[32m---- Test Summary ----\033[0m ")
-                print(f"\033[32mDuration:\033[0m {test_elapsed_time:.1f} seconds\033[0m ")
-                print(f"\033[32mContext:\033[0m {context_length} tokens")
-                print(f"\033[32mIndex:\033[0m {idx}")
-                print(f"\033[32mNeedle:\033[0m {problem_description_string}")
-                print(f"\033[32mQuestion:\033[0m {prompt_string}")
-                print(f"\033[32mResponse:\033[0m `{response}`")
-                print(f"\033[32mCorrect answer:\033[0m {golden_number}")
-                print(f"\033[32mScore:\033[0m {scores['strict']}/{scores['flex']}/{scores['loose']}")
-                print(f"\033[32mRetrieval Score:\033[0m {rouge_score}")
+                self.print_start_test_summary()
+
+            if stop_event:
+                self.stop_event = stop_event
+            else:
+                if not self.stop_event:
+                    self.stop_event = threading.Event()
+                self.stop_event.clear()
+                stop_event = self.stop_event
+
+            # Run through each iteration of context_lengths and depths
+            job_input_list = []
+            self.total_tasks = 0
+            self.finished_tasks = 0
+            debug("Collecting tests.")
+            for context_length in self.context_lengths:
+                if stop_event and stop_event.is_set():
+                    self._finished = False
+                    debug("Stop event triggered. Stopping the tester.")
+                    return
+                if context_length < context_lengths_min or context_length > context_lengths_max:
+                    continue
+                if self.skip_existing:
+                    existing_idx = self.result_exists(context_length)
+                else:
+                    existing_idx = []
+
+                for lazy_tokenized_problem_object in self.lazy_tokenized_problem_objects:
+                    problem_idx = lazy_tokenized_problem_object.problem_idx
+                    if self.problem_index_range:
+                        if self.problem_index_range[0] is not None and problem_idx < self.problem_index_range[0]:
+                            continue
+                        if self.problem_index_range[1] is not None and problem_idx >= self.problem_index_range[1]:
+                            continue
+                    self.total_tasks += 1
+                    if problem_idx in existing_idx:
+                        if self.print_ongoing_status:
+                            info(f"Existing: length {context_length} idx {problem_idx}")
+                        self.finished_tasks += 1
+                        continue
+
+                    job_input_list.append((context_length, lazy_tokenized_problem_object))
+            debug(f"There are {len(job_input_list)} tests queued. Submitting to executor.")
+            callback_results = dict(total_tasks=self.total_tasks, finished_tasks=self.finished_tasks)
+            callback_function(callback_results)
+            with ThreadPoolExecutor(len(self.service_url)) as executor:
+                self.model_mapping = {}
+                self.temp_model_list = [model for model in self.model_to_test_list]
+                lock = Lock()
+                lock2 = Lock()
+                lock3 = Lock()
+                self.results = []
+
+                def evaluate_helper(*args, **kwargs):
+                    try:
+                        self.add_running_thread({"role": "evaluate"})
+                        self.evaluate_and_log(*args, **kwargs)
+                        self.pop_running_thread()
+                    except Exception as e:
+                        self.pop_running_thread()
+                        raise e
+
+
+                futures = [executor.submit(evaluate_helper, context_length, lazy_tokenized_problem_object, lock,
+                                           lock2, lock3, callback_function, stop_event)
+                           for context_length, lazy_tokenized_problem_object in job_input_list]
+
+                for future in as_completed(futures):
+                    if stop_event and stop_event.is_set():
+                        self._finished = False
+                        info("Stop event triggered. Stopping the tester. The individual tests may take time to stop.")
+                        self.pop_running_thread()
+                        return
+                    future.result()  # Wait for all to complete
+            self._finished = True
+            self.pop_running_thread()
+            return
+        except Exception as e:
+            self.pop_running_thread()
+            raise e
+
+
+    def finished(self):
+        return self._finished
+
+
+    def evaluate_and_log(self, context_length, lazy_tokenized_problem_object: LazyTokenizedProblemObject,
+                         get_model_lock, gen_result_lock, print_lock, callback_function, stop_event):
+        if stop_event and stop_event.is_set():
+            return
+        thread_id = threading.get_ident()
+
+
+        with get_model_lock:
+            if thread_id not in self.model_mapping:
+                self.model_mapping[thread_id] = self.temp_model_list[0]
+                self.temp_model_list = self.temp_model_list[1:]
+            model = self.model_mapping[thread_id]
+            debug(f"Assigning thread_id {thread_id} to model {model.url}, temp_model_list={self.temp_model_list}",
+                  )
+
+        idx = lazy_tokenized_problem_object.problem_idx
+        problem_description = lazy_tokenized_problem_object.problem_description
+        prompt = lazy_tokenized_problem_object.prompt
+        golden_number = lazy_tokenized_problem_object.answer_number
+        prompt_string = str(prompt)
+        problem_description_string = str(problem_description)
+
+        prompt_tokens = prompt.tokens(model.tokenize)
+        problem_description_tokens = problem_description.tokens(model.tokenize)
+
+        filler = self.filler_generators[model].generate_filler(int(context_length))
+        filler.insert_needle(problem_description_tokens, 0)  # insert problem description at the beginning
+        filler.insert_needle(prompt_tokens)  # insert prompt at the end
+
+        # debug(f"Input kwargs: {filler.model_generate_kwargs()}")
+
+        test_start_time = time.time()
+        if self.retrieval_format:
+            model.tokens_to_generate = len(problem_description_tokens) + 150
+        else:
+            if self.problem_set == "simple":
+                model.tokens_to_generate = 600
+            else:
+                model.tokens_to_generate = 250
+        response = filler.model_generate().strip()
+
+        test_end_time = time.time()
+        test_elapsed_time = test_end_time - test_start_time
+
+        # problem description for comparison
+        problem_description_for_comparison = problem_description_string.replace("# Problem Description\n", "").replace(
+            "\n# Analysis\n", "")
+        problem_description_for_comparison = ''.join(re.split(r"\(Q\).*?\(A\)", problem_description_for_comparison))
+        response = ''.join(re.split(r'<<.*?>>', response))
+        problem_description_for_comparison = ''.join(re.split(r'<<.*?>>', problem_description_for_comparison))
+
+        debug(f"Problem Description for Comparison: `{problem_description_for_comparison}`", print_lock=print_lock)
+
+        rouge_score = scorer.score(problem_description_for_comparison, response)['rouge1'].recall * 100
+
+        def compare(matches, golden_num, idx):
+            matches_num = matches
+            _scores = 0
+            if idx is None:
+                idx = slice(None)
+            if isinstance(idx, slice):
+                for num in matches_num[idx]:
+                    if abs(num - golden_num) < 1e-6:
+                        return 100
+                return 0
+            if isinstance(idx, int):
+                try:
+                    if abs(matches_num[idx] - golden_num) < 1e-6:
+                        return 100
+                    return 0
+                except IndexError:
+                    return 0
+            return 0
+
+        response_lines = response.split("\n", maxsplit=1)
+        if len(response_lines) < 2:
+            response_first_line, response_others = response, ""
+        else:
+            response_first_line, response_others = response_lines
+        match_all = extract_numbers(response_first_line, False) + extract_numbers(response_others)
+        debug("Match all numbers:", match_all)
+        debug(f"Raw response: `{response}`")
+        if response.find("Answer") != -1:
+            target_sentence = response.split("Answer")[-1]
+            match = extract_numbers(target_sentence, False)
+            scores = {"strict": compare(match, golden_number, -1), "flex": compare(match, golden_number, None)}
+        else:
+            # find the last number
+            score = compare(match_all, golden_number, -1)
+            scores = {"strict": score, "flex": score}
+        scores["loose"] = compare(match_all, golden_number, None)
+        scores["rouge"] = rouge_score
+        results = self.generate_result_object(context_length, idx, problem_description_string, response, scores,
+                                              test_elapsed_time, prompt_string, golden_number)
+        with gen_result_lock:
+            if self.print_ongoing_status:
+                info()
+                info(f"\033[32m---- Test Summary ----\033[0m ")
+                info(f"\033[32mDuration:\033[0m {test_elapsed_time:.1f} seconds\033[0m ")
+                info(f"\033[32mContext:\033[0m {context_length} tokens")
+                info(f"\033[32mIndex:\033[0m {idx}")
+                info(f"\033[32mNeedle:\033[0m {problem_description_string}")
+                info(f"\033[32mQuestion:\033[0m {prompt_string}")
+                info(f"\033[32mResponse:\033[0m `{response}`")
+                info(f"\033[32mCorrect answer:\033[0m {golden_number}")
+                info(f"\033[32mScore:\033[0m {scores['strict']}/{scores['flex']}/{scores['loose']}")
+                info(f"\033[32mRetrieval Score:\033[0m {rouge_score}")
                 debug(f"Input: `{filler.get_input_string()[:100].__repr__()}`...")
                 debug(f"Input tokens: {filler.context_tokens[:8]}... of len {len(filler.context_tokens)}")
                 debug(f"Positions: {filler.needle_positions}")
-                debug(f"Tokens to generate: {self.model_to_test.tokens_to_generate}")
+                debug(f"Tokens to generate: {model.tokens_to_generate}")
 
-                print(f"\033[32m--- End Of Summary --- \033[0m")
+                info(f"\033[32m--- End Of Summary --- \033[0m")
 
             self.results.append(results)
+            self.finished_tasks += 1
+            if callback_function:
+                callback_results = results.copy()
+                callback_results.update(total_tasks=self.total_tasks, finished_tasks=self.finished_tasks)
+                callback_function(callback_results)
             # input("Waiting for input.")
-            context_file_location = f'{self.model_version.replace(".", "_")}_len_{context_length}_problem_{idx}'
 
-            if self.save_results:
-                # Save the context to file for retesting
-                if not os.path.exists(f'results/rope/{save_name}'):
-                    os.makedirs(f'results/rope/{save_name}')
+        if self.save_results:
+            save_name = self.save_name()
+            savefile_path = self.find_save_path()
+            context_file_location = f'{save_name.replace(".", "_")}_len_{context_length}_problem_{idx}'
 
-                # Save the result to file for retesting
-                p = f'results/rope/{save_name}/{context_file_location}_results.json'
-                print("Writing at %s" % p)
-                with open(p, 'w') as f:
-                    json.dump(results, f)
+            # Save the result to file for retesting
+            p = os.path.join(savefile_path, f"{context_file_location}_results.json")
+            if self.print_ongoing_status:
+                info(f"Writing at {p}")
+            with open(p, 'w') as f:
+                json.dump(results, f)
+
+    def save_name(self):
+        return self.experiment_specs_str
 
     def summarize(self):
         score_per_length = {}
@@ -721,63 +1163,110 @@ class LLMNeedleHaystackTester:
             full_retrieval += sum(retrieval_score_per_length[c_l])
             n_samples += len(score_per_length[c_l])
             score_per_length[c_l] = sum(score_per_length[c_l]) / max(1, len(score_per_length[c_l]))
-            retrieval_score_per_length[c_l] = sum(retrieval_score_per_length[c_l]) / max(1, len(retrieval_score_per_length[c_l]))
-
+            retrieval_score_per_length[c_l] = sum(retrieval_score_per_length[c_l]) / max(1, len(
+                retrieval_score_per_length[c_l]))
 
         lengths = list(score_per_length.keys())
         lengths.sort()
 
-        print()
-        print("#### Final Summary ####")
-        for length in lengths:
-            print(f"{length:6}", end=" ")
-        print()
-        for length in lengths:
-            print(f"{score_per_length[length] / 100:.4f}", end=" ")
-        print("< reasoning")
-        for length in lengths:
-            print(f"{retrieval_score_per_length[length] / 100:.4f}", end=" ")
-        print("< retrieval")
-        print("Overall:", full_score / max(1, n_samples))
-        print("Retrieval:", full_retrieval / max(1, n_samples))
+        if self.print_ongoing_status:
+            info()
+            info("#### Final Summary ####")
+            for length in lengths:
+                info(f"{length:6}", end=" ")
+            info()
+            for length in lengths:
+                info(f"{score_per_length[length] / 100:.4f}", end=" ")
+            info("< reasoning")
+            for length in lengths:
+                info(f"{retrieval_score_per_length[length] / 100:.4f}", end=" ")
+            info("< retrieval")
+            info("Overall:", full_score / max(1, n_samples))
+            info("Retrieval:", full_retrieval / max(1, n_samples))
 
-    def result_exists(self, context_length, idx):
+    def result_exists(self, context_length):
         """
         Checks to see if a result has already been evaluated or not
         """
 
-        results_dir = 'results/rope/' + self.model_version
-        print("Searching existing results at %s" % results_dir)
+        results_dir = self.save_path()
+        if self.print_ongoing_status:
+            info("Searching existing results at %s ..." % results_dir, end="")
         if not os.path.exists(results_dir):
-            return False
+            if self.print_ongoing_status:
+                info("Done")
+            return []
+        existing_idx = []
         for filename in os.listdir(results_dir):
             if filename.endswith('.json'):
+                keys = filename.split("_")
+                if "len" not in keys:
+                    continue
+                len_id = keys.index("len") + 1
+                length = keys[len_id]
+                problem_id = keys.index('problem') + 1
+                pid = keys[problem_id]
+                if length != str(context_length):
+                    continue
+
+                content_match = False
+                if not content_match:
+                    existing_idx.append(int(pid))
+                    continue
+
                 with open(os.path.join(results_dir, filename), 'r') as f:
                     result = json.load(f)
                     context_length_met = result['context_length'] == context_length
-                    depth_percent_met = result['index'] == idx
+
                     version_met = result.get('version', 1) == self.results_version
                     model_met = result['model'] == self.model_to_test_description
                     # import ipdb; ipdb.set_trace()
-                    if context_length_met and depth_percent_met and version_met and model_met:
-                        return True
-        return False
+                    if context_length_met and version_met and model_met:
+                        existing_idx.append(result['index'])
+                        if int(pid) != result['index']:
+                            exit(1)
+        if self.print_ongoing_status:
+            info("Done")
+        return existing_idx
 
     def print_start_test_summary(self):
-        print("\n")
-        print("Starting Needle In A Haystack Testing...")
-        print(f"- Model: {self.model_version}")
-        print(
+        info("\n")
+        info("Starting Test...")
+        info(f"- Model: {self.model_to_test_description}")
+        info(
             f"- Context Lengths: {len(self.context_lengths)}, Min: {min(self.context_lengths)}, Max: {max(self.context_lengths)}")
-        print(
+        info(
             f"- Number of problems: {len(self.problem_descriptions)}")
-        print("\n\n")
+        info("\n\n")
 
-    def start_test(self, args):
-        if self.print_ongoing_status:
-            self.print_start_test_summary()
-        self.run_test(args)
+    def start_test(self, *, context_lengths_min,
+                 context_lengths_max,
+                 context_lengths_num_intervals,
+                 url_list,
+                 save_results=True,
+                 skip_existing=False,
+                 num_problems=None,
+                 problem_index_start=None, problem_index_end=None,
+                 print_ongoing_status=False,
+                   callback_function=None,
+                   stop_event=None
+                   ):
+        self.run_test(context_lengths_min=context_lengths_min,
+                      context_lengths_max=context_lengths_max,
+                      context_lengths_num_intervals=context_lengths_num_intervals,
+                      url_list=url_list,
+                      save_results=save_results,
+                      skip_existing=skip_existing,
+                      num_problems=num_problems,
+                      problem_index_start=problem_index_start,
+                      problem_index_end=problem_index_end,
+                      print_ongoing_status=print_ongoing_status,
+                      callback_function=callback_function,
+                      stop_event=stop_event)
         self.summarize()
+
+    def standard_start_test_adapter(self, **kwargs):
+        self.start_test(**kwargs)
 
 
 token_dict = {}
@@ -787,7 +1276,7 @@ def get_end_of_sentence_symbol_memoization(enc):
     def memoize(enc):
         if '.' in token_dict:
             return token_dict['.']
-        print("get token by calling multiple cases")
+        debug("get token by calling multiple cases")
         sentence1 = enc.tokenize("Good.", ignore_special_tokens=True)
         sentence2 = enc.tokenize("This is the last chance.", ignore_special_tokens=True)
         sentence3 = enc.tokenize("The answer is 2.", ignore_special_tokens=True)
@@ -800,11 +1289,24 @@ def get_end_of_sentence_symbol_memoization(enc):
     period_tokens = memoize(enc)
     return period_tokens
 
+
 def get_space_memoization(enc):
     if ' ' in token_dict:
         return token_dict[' ']
-    token_dict[' '] = enc.tokenize("  ", ignore_special_tokens=True)
+    possible_numbers_of_spaces = list(range(1, 32)) + list(2 ** k for k in range(5, 14))
+    d = {}
+    for i in possible_numbers_of_spaces:
+        space_tokens = enc.tokenize(" " * i, ignore_special_tokens=True)
+        debug(space_tokens, f"Number of spaces: {i}, `{' ' * i}`")
+
+        d[i] = space_tokens
+        if len(space_tokens) >= 2 and space_tokens[0] == space_tokens[1]:
+            break
+        i += 1
+    token_dict[' '] = space_tokens[0:1]
+    debug(token_dict[" "], f"Number of spaces: {i}")
     return token_dict[' ']
+
 
 if __name__ == "__main__":
     # Tons of defaults set, check out the LLMNeedleHaystackTester's init for more info
@@ -818,9 +1320,16 @@ if __name__ == "__main__":
     parser.add_argument("--discard", action="store_true", help="discard the results")
     parser.add_argument("--skip_existing", action="store_true", help="skip existing")
     parser.add_argument("--num_problems", type=int, default=10, help="number of problems")
-    parser.add_argument("--filler", type=str, help='["essay", "fake_distance", "sequence_space", "sequence_<str>", "..."]')
-    parser.add_argument("--debug", action="store_true", help="debug mode")
+    parser.add_argument("--filler", type=str,
+                        help='["essay", "fake_distance", "sequence_space", "sequence_<str>", "..."]')
+    parser.add_argument("--output_level", type=str, choices=["info", "debug", "none"], default="info",
+                        help="global output level")
+    parser.add_argument("--print_ongoing_status", action="store_true",
+                        help="output tester info (subordinated by global output level)")
     parser.add_argument("--retrieval", action="store_true", help="retrieval mode")
+    parser.add_argument("--problem_index_start", type=int, default=None, help="start index of problem")
+    parser.add_argument("--problem_index_end", type=int, default=None, help="end index of problem")
+    parser.add_argument("--problem_set", type=str, default=None, help="ps")
     # parser = add_args(parser)
     args = parser.parse_args()
 
@@ -830,18 +1339,23 @@ if __name__ == "__main__":
         args.s_len = args.s
     if not hasattr(args, 'e_len'):
         args.e_len = args.e
-    _debug_flag = args.debug
-    ht = LLMNeedleHaystackTester(experiment_name=model_name + args.model_name_suffix,
-                                 save_results=not args.discard,
-                                 context_lengths_min=args.s_len,
-                                 context_lengths_max=args.e_len,
-                                 context_lengths_num_intervals=args.num_intervals,
-                                 url=args.url,
-                                 skip_existing=args.skip_existing,
-                                 num_few_shots=0,
-                                 num_problems=args.num_problems,
-                                 filler_type=args.filler,
-                                 retrieval_format=args.retrieval
-                                 )
+    output_level = args.output_level
+    ht = FillerTester(experiment_name=model_name + args.model_name_suffix,
+                      num_few_shots=0,
+                      filler_type=args.filler,
+                      retrieval_format=args.retrieval,
+                      problem_set=args.problem_set,
+                      )
 
-    ht.start_test(args)
+    ht.standard_run_test_api(
+        save_results=not args.discard,
+        context_lengths_min=args.s_len,
+        context_lengths_max=args.e_len,
+        context_lengths_num_intervals=args.num_intervals,
+        url_list=args.url,
+        skip_existing=args.skip_existing,
+        num_problems=args.num_problems,
+        problem_index_start=args.problem_index_start,
+        problem_index_end=args.problem_index_end,
+        print_ongoing_status=args.print_ongoing_status
+    )
