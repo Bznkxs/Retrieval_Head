@@ -4,8 +4,10 @@ results_dir = 'results/rope/rope_gsm8k_v0312_filler_sequence_space'
 import sys
 if len(sys.argv) > 1:
     results_dir = sys.argv[1]
-
-
+if len(sys.argv) > 2:
+    remove_invalid = True if (sys.argv[2] == "True") else False
+else:
+    remove_invalid = False
 import os
 import json
 import tqdm
@@ -174,11 +176,26 @@ def good(name):
         return True
     return False
 
-def read_files(results_dir, filename_list):
+def read_files(results_dir, filename_list, _remove_invalid=False):
     results = []
     for filename in tqdm.tqdm(filename_list):
         with open(os.path.join(results_dir, filename), 'r') as f:
-            result = json.load(f)
+            try:
+                result = json.load(f)
+            except Exception as e:
+                print("EXCEPTION", e, )
+                print(f"When reading {os.path.join(results_dir, filename)}")
+                print("----")
+                os.remove(os.path.join(results_dir, filename))
+                continue
+            if result.get("context_length") is None:
+                print(filename)
+                print(result)
+                print()
+                continue
+            if result["score"]["loose"] == 0 and result["score"]["rouge"] > 95 and result["context_length"] == 3750:
+                beautify_result(result)
+                continue
             results.append(result)
     return results
 
@@ -279,8 +296,8 @@ class Summary:
         for filename in os.listdir(results_dir):
             if filename.endswith('.json') and good(filename):
                 filenames.append(filename)
-
-        results = read_files(results_dir, filenames)
+        # print(filenames)
+        results = read_files(results_dir, filenames, remove_invalid)
         results.sort(key=lambda x: (int(x['context_length']), int(x['index'])))
         self.results = results
         # print(get_result_at_point(results, 0, 0))
@@ -290,9 +307,10 @@ class Summary:
         self.n_samples = {}
 
     def add_score_record(self, length, scores):
-        if scores["small_answer"]:
+        if scores.get("small_answer"):
             return
-        scores.pop("small_answer")
+        if scores.get("small_answer") is not None:
+            scores.pop("small_answer")
         if not self.scores_per_length.get(length, None):
             self.scores_per_length[length] = {key: [] for key in scores.keys()}  # {len: {key: [number]}}
 
@@ -305,17 +323,20 @@ class Summary:
         score_keys = set()
         for length in lengths:
             score_keys.update(set(self.scores_per_length[length].keys()))
+
         full_scores = {key: 0. for key in score_keys}  # {key: number}
         avg_scores_per_length = {length: {} for length in lengths}   # {len: {key: number}}
         avg_scores_up_to_length = {length: {} for length in lengths}  # {len: {key: number}}
         n_samples = {key: 0 for key in score_keys}  # {key: number}
-
+        n_samples_per_length = {length: {} for length in lengths}
         for length in lengths:
             for key in self.scores_per_length[length].keys():
                 score_records = self.scores_per_length[length].get(key, [])
                 sum_scores = sum(score_records)
                 n_samples_l_k = len(score_records)
                 avg_scores_per_length[length][key] = sum_scores / max(1., n_samples_l_k)
+                n_samples_per_length[length][key] = n_samples_l_k
+                avg_scores_per_length[length]["_n_samples"] = n_samples_l_k
                 full_scores[key] += sum_scores
                 n_samples[key] += n_samples_l_k
                 avg_scores_up_to_length[length][key] = full_scores[key] / max(1., n_samples[key])
@@ -327,6 +348,7 @@ class Summary:
         self.avg_scores_up_to_length = avg_scores_up_to_length
         self.n_samples = n_samples
         self.score_keys = score_keys
+        # self.score_keys.add("_n_samples")
         # self.score_keys = ["rouge", "rouge1", 'number_match', 'substep_number_match', 'retrieval_binary',]
         self.lengths = lengths
 
@@ -337,11 +359,13 @@ class Summary:
         for result in results:
             # for now only check "loose"
             c_l = result["context_length"]
+            if result.get("hole_no") is not None:
+                c_l = (c_l, result["hole_no"])
             l_s = result["score"]["loose"]
-            l_r = result["score"]["rouge"]
-            l_c = calculate_retrieval_score(result)
+            l_r = result["score"].get("rouge", 0)
+            # l_c = calculate_retrieval_score(result)
             score = {"reasoning": l_s, "rouge1": l_r,}
-            score.update(**l_c)
+            # score.update(**l_c)
             self.add_score_record(c_l, score)
 
         # calculate average
@@ -352,11 +376,17 @@ class Summary:
         print()
         print("---------- Summary ----------")
         for length in self.lengths:
-            print(f"{length:6}", end=" ")
+            if isinstance(length, int):
+                print(f"{length:8}", end="  ")
+            else:
+                print(f"{length[0]:6}, {length[1]:1}", end=" ")
         print()
-        for key in self.score_keys:
+        for key in list(self.score_keys) + ["_n_samples"]:
             for length in self.lengths:
-                print(f"{scores_per_length[length][key] / 100:.4f}", end=" ")
+                if key != "_n_samples":
+                    print(f"{scores_per_length[length][key] / 100:.4f}", end="    ")
+                else:
+                    print(f"{scores_per_length[length][key]:8}", end="  ")
             print(f" < {key}")
         print("Overall:")
         for key in self.score_keys:

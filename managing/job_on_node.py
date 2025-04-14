@@ -25,7 +25,7 @@ def check_megatron_server_status(node_name, port_range=None):
     for port in port_range:
         url = f"http://{node_name}:{port}/api/info"
         try:
-            response = requests.put(url, timeout=1)
+            response = requests.put(url, timeout=.5)
             if response.status_code == 200:
                 responses.append({"info": json.loads(response.text), "server": True,
                                   "running": True, "main_port": port, "status_code": 200})

@@ -1,7 +1,9 @@
 import inspect
 import json
 import os
+import subprocess
 import threading
+import sys
 
 from flask import Flask, render_template, request, jsonify, Response, stream_with_context
 from manage import Experiment, ExperimentManager, Hook
@@ -86,17 +88,28 @@ def run_all():
 
 @app.route("/run")
 def run():
-    exp_dir = request.args.get("exp_dir", None)
+    kwargs = {key: value for key, value in request.args.items()}
+    for key in kwargs:
+        print(key, kwargs[key])
+        if key.startswith("dynamic_model_info_list"):
+            print("!")
+            kwargs[key] = json.loads(kwargs[key])
+
+    exp_dir = kwargs.get("exp_dir", None)
     if exp_dir is None:
         return jsonify({"error": f"exp dir not provided"})
+    kwargs.pop("exp_dir")
     experiment = manager.open_experiment(exp_dir=exp_dir)
     print(f"RUN the experiment on {exp_dir}")
+    print(kwargs)
+    print()
+
     @stream_with_context
     def sse_wrapping():
 
         stop_event = threading.Event()
         try:
-            for result in manager.run_one_experiment(experiment, True, stop_event=stop_event):
+            for result in manager.run_one_experiment(experiment, True, stop_event=stop_event, **kwargs):
 
                 if request.environ.get('wsgi.input').closed:
                     print("Client disconnected.")
@@ -157,6 +170,14 @@ def submit_jobs():
         return jsonify({"error": f"Exception of type {type(e)}: {e}"}), 500
 
 
+@app.route("/get_history")
+def get_history():
+    try:
+        return jsonify(manager.get_history())
+    except Exception as e:
+        print("????", e)
+        raise e
+
 
 # @app.route("/set_the_results_library", methods=["POST"])
 # def set_the_results_library():
@@ -166,7 +187,17 @@ def submit_jobs():
 #         # manager.set_the_results_library(**dynamic_kwargs(["directory", "save_to_config"], **kwargs))
 #     except Exception as e:
 #         return jsonify({"error": f"Exception of type {type(e)}: {e}"}), 500
-
+@app.route("/submit_command", methods=["POST"])
+def submit_command():
+    kwargs = request.get_json(force=True)
+    try:
+        completed_process = subprocess.run(kwargs["command"].split(), capture_output=True)
+        return jsonify({"stdout": completed_process.stdout.decode("utf-8"), "stderr": completed_process.stderr.decode("utf-8")})
+    except FileExistsError as e:
+        return jsonify({"message": "failed", "error": f"Exception of type {type(e)}: {e}"})
+    except Exception as e:
+        print(e)
+        return jsonify({"error": f"Exception of type {type(e)}: {e}"}), 400
 
 
 @app.route("/define_experiment", methods=["POST"])
@@ -181,6 +212,27 @@ def define_experiment():
     except Exception as e:
         print(e)
         return jsonify({"error": f"Exception of type {type(e)}: {e}"}), 400
+
+@app.route("/update_api_key", methods=["POST"])
+def update_api_key():
+    kwargs = request.get_json(force=True)
+    try:
+        manager.update_api_key(kwargs["api_name"], kwargs["api_key"])
+        return jsonify({"message": "success"})
+    except FileExistsError as e:
+        return jsonify({"message": "failed", "error": f"Exception of type {type(e)}: {e}"})
+    except Exception as e:
+        print(e)
+        return jsonify({"error": f"Exception of type {type(e)}: {e}"}), 400
+
+@app.route("/get_api_keys", )
+def get_api_keys():
+    try:
+        return jsonify({"api_keys": manager.get_api_keys()})
+    except Exception as e:
+        print(e)
+        return jsonify({"error": f"Exception of type {type(e)}: {e}"}), 400
+
 
 @app.route("/find_and_open_all_experiments_in_dir")
 def find_and_open_all_experiments_in_dir():
@@ -258,12 +310,20 @@ def cancel_slurm_job():
 @app.route("/get_slurm_settings")
 def get_slurm_settings():
     try:
-        manager.get_slurm_settings()
         return jsonify({"settings": manager.get_slurm_settings()})
     except Exception as e:
         print(e)
         return jsonify({"error": f"Exception of type {type(e)}: {e}"}), 400
 
+
+@app.route("/get_user_info")
+def get_user_info():
+    try:
+
+        return jsonify(manager.get_user_info())
+    except Exception as e:
+        print(e)
+        return jsonify({"error": f"Exception of type {type(e)}: {e}"}), 400
 
 @app.route("/slurm_jobs")
 def get_slurm_jobs():
@@ -287,4 +347,4 @@ if __name__ == '__main__':
     # logging.getLogger('werkzeug').disabled = True
     # app.logger.disabled = True
     gsm8k_rope.output_level = "debug"
-    app.run(host="0.0.0.0", port=8000, debug=True)
+    app.run(host="0.0.0.0", port=int(sys.argv[1]), debug=True, threaded=True)

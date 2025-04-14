@@ -58,3 +58,13 @@ class Config:
             self._config = self.get_config(self.config_root, self.name)
         self._config[key] = value
         self.write_config(self.config_root, self.name, self._config)
+
+    def sync(self):
+        self.write_config(self.config_root, self.name, self._config)
+
+    def exists(self):
+        config_name = self.name
+        if not config_name.endswith('.json'):
+            config_name += '.json'
+        return os.path.exists(os.path.join(self.config_root, config_name))
+

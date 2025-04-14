@@ -2,13 +2,15 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Manager</title>
+    <title>ExperimentManager</title>
 
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@4.0.0/dist/css/bootstrap.min.css" integrity="sha384-Gn5384xqQ1aoWXA+058RXPxPg6fy4IWvTNh0E263XmFcJlSAwiGgFAW/dAiS6JXm" crossorigin="anonymous">
 <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}">
 </head>
 <body>
-    <h1> Manager </h1>
+    <h1> Experiment Manager </h1>
+    <h2 id="user-info-h2"> *** </h2>
+    <h2> Experiment List </h2>
     <div id="experiment_list">
         <div id="experiment_list_list">
 
@@ -23,16 +25,22 @@
             <label for="new-experiment-running-specs-input">Running Specs</label><textarea id="new-experiment-running-specs-input" name="rspecs" cols="40" rows="5"></textarea>
         </div>
         <div id="button-new-experiment" class="btn">New Experiment</div>
+        <div id="button-refresh" class="btn">Refresh</div>
     </div>
+    <h2> Node List </h2>
     <div id="node_list">
         <div id="node_list_list">
         </div>
         <div id="button-kill-all-megatron" class="btn">Kill All Megatron Jobs</div>
         <div id="button-submit-megatron" class="btn">Submit Megatron Jobs</div>
         <label for="megatron_list_of_argument_input">List of arguments:</label><textarea id="megatron_list_of_argument_input"></textarea>
-    </div>
-    <div id="button-refresh" class="btn">Refresh</div>
+        <h3> Submit History </h3>
+        <div id="megatron_history_list_div">
 
+        </div>
+    </div>
+
+    <h2> Slurm Job List </h2>
     <div id="job_list">
         <div id="job_list_list"></div>
         <label for="sbatch-script-file-input">Import sbatch settings from sbatch file</label>
@@ -49,7 +57,27 @@
 
         </div>
     </div>
-    <div id="operation-status-div"></div>
+    <h2> API Keys </h2>
+    <div>
+        <div id="api-keys-list"></div>
+        <div id="refresh-keys-button" class="btn">Refresh</div>
+        <label for="keyname-input">API Key Name:</label>
+            <input id="keyname-input" value="openai">
+        <label for="keyvalue-input">API Key:</label>
+        <input id="keyvalue-input" type="password" >
+        <div id="submit-key-button" class="btn">Update</div>
+        <label for="num_threads-input">Number of concurrent API calls:</label>
+        <input id="num_threads-input" value="1" >
+
+    </div>
+    <h2>Direct Command</h2>
+    <div>
+        <label for="command-input">Command:</label><textarea id="command-input"></textarea><div id="button-submit-command" class="btn"> >Submit< </div>
+        <div id="stdout-output-div"></div>
+        <div id="stderr-output-div"></div>
+    </div>
+    <h2>Operation Status</h2>
+    <div id="operation-status-div">Ready.</div>
     <script src="{{ url_for('static', filename='js/main.js') }}"></script>
 </body>
 </html>

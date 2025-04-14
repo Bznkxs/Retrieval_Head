@@ -125,7 +125,7 @@ def squeue_for_parsing():
     string_results = run_squeue_and_return("--format", "%all")
     return SqueueResults(string_results)
 
-def submit_slurm_job(account, partition, nodes, time, gres="gpu:4", **kwargs):
+def submit_slurm_job(account, partition, nodes, time, gres="gpu:4", saveconfigdir=None, **kwargs):
     """
     time must be of hh:mm:ss
     """
@@ -161,7 +161,9 @@ def parse_sbatch_file(filename):
             line = line.strip()
             if line.startswith("#SBATCH"):
                 line = line.replace("#SBATCH --", "")
+
                 line = line.split("#")[0]  # remove comments
+                line = line.strip()
                 key, value = line.split("=", maxsplit=1)
                 kwargs[key] = value
         return kwargs

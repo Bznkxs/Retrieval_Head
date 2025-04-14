@@ -44,7 +44,7 @@ document.addEventListener('DOMContentLoaded', () => {
     let auto_job_mode = "unknown";
     let auto_job_nodes = "0"
     let target_job_mode = "uninitiated"
-    fetch("/init").then(() => {
+    fetch("/init").then(async () => {
         async function refresh_experiment_list() {
             const response = await fetch('/find_and_open_all_experiments_in_dir');
             const data = await response.json();
@@ -91,13 +91,35 @@ document.addEventListener('DOMContentLoaded', () => {
 
                 })
 
-                const specsDiv = document.createElement("div");
-                showContentDiv.appendChild(specsDiv);
+                const specs = data[i].specs;
+                const constantSpecs = {};
+
+
+                const specsOuterDiv = document.createElement("div");
+                showContentDiv.appendChild(specsOuterDiv);
+                const constantSpecsDiv = document.createElement("div");
+                specsOuterDiv.appendChild(constantSpecsDiv);
+                const specsDiv =  document.createElement("div");
+                specsOuterDiv.appendChild(specsDiv);
                 specsDiv.style.display = "grid";
-                const specs_col = Object.keys(data[i].specs);
+
+
+                for (let spec in specs) {
+                    if (specs[spec].choices && specs[spec].choices.length === 1) {
+                        constantSpecs[spec] = specs[spec].choices[0]
+                    }
+                }
+
+                constantSpecsDiv.innerHTML = "<b>Constant Specs:</b>" + JSON.stringify(constantSpecs);
+
+                const specs_col = Object.keys(specs);
                 specs_col.sort();
+
                 const augmented_specs_col = [];
                 for (const spec in specs_col) {
+                    if (specs_col[spec] in constantSpecs) {
+                        continue;
+                    }
                     augmented_specs_col.push(specs_col[spec]);
                 }
                 augmented_specs_col.push("status");
@@ -114,6 +136,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 for (let specs_idx in data[i].specs_expansion) {
                     let specs = data[i].specs_expansion[specs_idx].specs;
                     for (let spec in specs) {
+                        if (spec in constantSpecs) {
+                            continue;
+                        }
                         const gridDiv = document.createElement("div");
                         specsDiv.appendChild(gridDiv);
                         gridDiv.innerText = specs[spec];
@@ -137,7 +162,24 @@ document.addEventListener('DOMContentLoaded', () => {
                     specs_status_divs.push(gridDiv);
                 }
                 async function runExperiment () {
-                    const source = new EventSource(`/run?exp_dir=${data[i].path}`);
+                    let args = `exp_dir=${data[i].path}`;
+                    console.log("APIKEYS")
+                    console.log(apiKeys)
+                    console.log(Number(document.getElementById("num_threads-input")))
+                    for (let key in apiKeys) {
+                        args += `&dynamic_model_info_list_for_${key}=[[`
+                        for (let i = 0; i < Number(document.getElementById("num_threads-input").value); ++i) {
+                            if (i > 0) {
+                                args += ",";
+                            }
+                            args += '"' + apiKeys[key] + '"';
+
+                        }
+                        args += "]]";
+                    }
+                    console.log(args)
+
+                    const source = new EventSource(`/run?${args}`);
                     source.onmessage = function(event) {
                         const eventData = JSON.parse(event.data);
                         if (eventData.status === "running") {
@@ -289,6 +331,21 @@ document.addEventListener('DOMContentLoaded', () => {
             const job_list_list = document.getElementById("job_list_list");
             job_list_list.replaceChildren();
 
+            auto_job_mode = data.auto_submit.mode
+            auto_job_nodes = data.auto_submit.nodes
+            if (!auto_job_nodes) {
+                auto_job_nodes = "0";
+            }
+
+            const current_nodes = data.nodes_cnt
+            document.getElementById("nodes_cnt_div").innerText = `Submitted jobs contain ${current_nodes} nodes in total.`
+            set_auto_management_button_inner_text()
+
+            if (data.data.length === 0) {
+                job_list_list.innerText = "You haven't submitted any job right now."
+                return;
+            }
+
             job_list_list.style.display = "grid";
             job_list_list.style.gridTemplateColumns = `repeat(${data.headers.length + 1}, 1fr)`;
             for (let h in data.headers) {
@@ -334,9 +391,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 gridDiv.addEventListener("mouseup", (event) => {
                     if (event.button === 0) {
                         if (gridDiv.innerText === `Cancel JOBID=${jobid}`) {
-                            gridDiv.innerText = "Cancel (Left Click Once More to Confirm, Right Click to Give Up)"
+                            gridDiv.innerText = "Cancel (Left Click Once More to Confirm)"
 
-                        } else if (gridDiv.innerText === "Cancel (Left Click Once More to Confirm, Right Click to Give Up)") {
+                        } else if (gridDiv.innerText === "Cancel (Left Click Once More to Confirm)") {
                             gridDiv.innerText = "Canceling"
                             gridDiv.classList.remove("btn")
                             fetch("/cancel_slurm_job",  {
@@ -352,20 +409,28 @@ document.addEventListener('DOMContentLoaded', () => {
                     }
                     slurm_job_operation_button_texts[jobid] = gridDiv.innerText
                 })
-            }
-            auto_job_mode = data.auto_submit.mode
-            auto_job_nodes = data.auto_submit.nodes
-            if (!auto_job_nodes) {
-                auto_job_nodes = "0";
+                gridDiv.addEventListener("mouseleave", () => {
+                    gridDiv.innerText = `Cancel JOBID=${jobid}`;
+                    slurm_job_operation_button_texts[jobid] = gridDiv.innerText;
+                })
             }
             console.log(data)
-            const current_nodes = data.nodes_cnt
-            document.getElementById("nodes_cnt_div").innerText = `Submitted jobs contain ${current_nodes} nodes in total.`
-            set_auto_management_button_inner_text()
-
 
 
         }
+
+        async function get_user_info() {
+            const response = await fetch("/get_user_info");
+            const data = await response.json();
+            if (response.status !== 200) {
+                console.log(response)
+                console.log(data)
+            }
+            document.getElementById("user-info-h2").innerText = `Hello Manager ${data.username}!`
+        }
+
+        get_user_info()
+
 
         function set_auto_management_button_inner_text() {
             if (auto_job_mode === "on" && (target_job_mode === "on" || target_job_mode === "uninitiated")) {
@@ -414,7 +479,7 @@ document.addEventListener('DOMContentLoaded', () => {
             while (true) {
                 refresh_node_list().then(() => {});
                 refresh_slurm_job_list().then(() => {})
-                await new Promise(resolve => setTimeout(resolve, 1000));
+                await new Promise(resolve => setTimeout(resolve, 4000));
             }
         }
 
@@ -424,16 +489,6 @@ document.addEventListener('DOMContentLoaded', () => {
         document.getElementById('button-refresh').addEventListener('click', async () => {
             refresh_experiment_list().then(() => {});
             refresh_node_list().then(() => {});
-            // const response = await fetch('/say_hello', {
-            //     method: 'POST',
-            //     headers: {
-            //         'Content-Type': 'application/json'
-            //     },
-            //     body: JSON.stringify({ text: inputText })
-            // });
-            //
-            // const data = await response.json();
-            // document.getElementById('response').innerText = data.result;
         });
         async function new_experiment() {
             console.log(new_experiment_specs_input.value)
@@ -478,7 +533,36 @@ document.addEventListener('DOMContentLoaded', () => {
 
                 body: megatron_list_of_argument_input.value
             })
+            getHistory();
         })
+        getHistory();
+        async function getHistory() {
+            const response = await fetch("/get_history");
+            if (response.status !== 200) {
+                return undefined;
+            }
+            const data = await response.json();
+            console.log(data);
+            console.log("____")
+            // data.history.submit_backend_jobs_history
+            const megatron_history_list_div = document.getElementById("megatron_history_list_div");
+            megatron_history_list_div.replaceChildren()
+            for (let idx in data.submit_backend_jobs_history) {
+                const submit_backend_history = data.submit_backend_jobs_history[idx];
+                const div = document.createElement("div");
+                megatron_history_list_div.appendChild(div);
+                div.innerText = JSON.stringify(submit_backend_history);
+                div.addEventListener("click", () => {
+                    megatron_list_of_argument_input.value = JSON.stringify(submit_backend_history);
+                })
+                div.classList.add("btn")
+                megatron_history_list_div.appendChild(div)
+            }
+
+            return data;
+        }
+
+
 
         document.getElementById("button-submit-job").addEventListener("click", async() => {
             const response = await fetch("/submit_slurm_job", {
@@ -510,7 +594,91 @@ document.addEventListener('DOMContentLoaded', () => {
             }
             const data = await response.json();
             console.log(response)
+            if (data.settings)
+                document.getElementById("new-job-settings-input").value = JSON.stringify(data.settings);
             document.getElementById("operation-status-div").innerText = `Operation Import returned status ${response.status}. Response: ${JSON.stringify(data)}`
+        })
+
+        let apiKeys = null
+        async function getAPIKeys() {
+            const response = await fetch("/get_api_keys")
+            const data = await response.json();
+            console.log(response)
+            if (response.status === 200) {
+                apiKeys = data.api_keys;
+                document.getElementById("api-keys-list").replaceChildren();
+                for (let key in data.api_keys) {
+                    const div = document.createElement("div");
+                    div.innerText = `${key}: ${data.api_keys[key] ? 'Provided': 'None'}`
+                    document.getElementById("api-keys-list").appendChild(div)
+                }
+            } else {
+                document.getElementById("operation-status-div").innerText = `Operation Get API Keys returned status ${response.status}. Response: ${JSON.stringify(data)}`
+            }
+        }
+
+        getAPIKeys()
+
+        async function uploadAPIKey() {
+            const response = await fetch("/update_api_key", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                },
+
+                body: JSON.stringify({
+                    api_name: document.getElementById("keyname-input").value,
+                    api_key: document.getElementById("keyvalue-input").value
+                })
+
+            })
+            const data = await response.json();
+            if (response.status !== 200) {
+                console.log(response)
+            }
+            document.getElementById("operation-status-div").innerText = `Operation uploadAPIKey returned status ${response.status}. Response: ${JSON.stringify(data)}`
+            return response;
+        }
+
+        document.getElementById("refresh-keys-button").addEventListener("click", async() => {
+            getAPIKeys();
+        })
+
+        document.getElementById("submit-key-button").addEventListener("click", async() => {
+            const response = await uploadAPIKey();
+            if (response.status === 200) {
+                getAPIKeys();
+            }
+            document.getElementById("operation-status-div").innerText = `Operation uploadAPIKey returned status ${response.status}. `
+
+        })
+
+
+        document.getElementById("button-submit-command").addEventListener("click", async() => {
+            const response = await fetch("/submit_command", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                },
+
+                body: JSON.stringify({
+                    command: document.getElementById("command-input").value
+                })
+            })
+            const data = await response.json();
+            if (response.status !== 200) {
+                console.log(response)
+            } else {
+                document.getElementById("stdout-output-div").innerText = data.stdout;
+                document.getElementById("stderr-output-div").innerText = data.stderr;
+                document.getElementById("stdout-output-div").style.whiteSpace = "pre";
+                document.getElementById("stderr-output-div").style.whiteSpace = "pre";
+
+            }
+
+
+            console.log(response)
+            document.getElementById("operation-status-div").innerText = `Operation Submit Command returned status ${response.status}. Response: ${JSON.stringify(data)}`
         })
     });
 
